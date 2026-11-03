@@ -1,0 +1,15 @@
+{% extends 'base.html' %}
+{% block title %}Report · {{ client.first_name }} {{ client.last_name }}{% endblock %}
+{% block content %}
+<div class="heading reveal"><div><div class="muted"><a href="{{ url_for('main.client_detail', slug=client.slug) }}">← {{ client.first_name }} {{ client.last_name }}</a></div><h1>PCOMS report</h1><div class="id">{{ client.slug }} · read from the generated workbook</div></div>
+<div class="actions-row noprint"><a class="btn" href="{{ url_for('main.export_client', slug=client.slug) }}">Download .xlsx</a><button class="btn light" type="button" data-print>Print</button></div></div>
+<section class="panel reveal" data-tabs>
+<div class="tabs" role="tablist">{% for name in tables %}<button class="tab {{ 'active' if loop.first }}" type="button" role="tab" data-tab="{{ name }}" aria-selected="{{ 'true' if loop.first else 'false' }}">{{ name }}</button>{% endfor %}</div>
+{% for name, sheet in tables.items() %}<div data-panel="{{ name }}" class="sheet-panel {{ '' if loop.first else 'hidden' }}" role="tabpanel">
+<div class="tablewrap"><table class="sheet"><thead><tr>{% for h in sheet[0] %}<th>{{ h }}</th>{% endfor %}</tr></thead><tbody>
+{% for row in sheet[1] %}<tr>{% for v in row %}<td class="num">{% if v is number %}{{ '%.2f'|format(v) }}{% elif v %}{{ v }}{% else %}—{% endif %}</td>{% endfor %}</tr>{% else %}<tr><td colspan="{{ sheet[0]|length }}" class="muted">No sessions yet.</td></tr>{% endfor %}
+</tbody></table></div>
+{% if name == 'Total' %}<p class="muted">Totals are the sum of the four lines in each session, exactly as the Total sheet's formulas in the downloaded file work out.</p>{% endif %}
+</div>{% endfor %}
+</section>
+{% endblock %}

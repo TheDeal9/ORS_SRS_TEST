@@ -1,0 +1,9 @@
+# local data and secrets: never commit client records, databases or env files
+data/
+.env
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.vscode/
+Automate_ORS_SRS_Excel_Scoring.md

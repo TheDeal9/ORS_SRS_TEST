@@ -1,0 +1,10 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>Administrator sign in</title>
+<script src="{{ url_for('static', filename='theme.js') }}"></script><link rel="icon" href="data:,"><link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}"></head>
+<body class="center"><button class="icon-btn theme-corner" type="button" data-theme-toggle aria-pressed="false">Dark mode</button>
+<form class="card-page reveal" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><h1>Administrator sign in</h1><p>Sign in to manage clients, review private scores and download reports.</p>
+{% with messages = get_flashed_messages() %}{% if messages %}<p class="warn-box">{{ messages[0] }}</p>{% endif %}{% endwith %}
+<label for="username">Administrator ID</label><input type="text" id="username" name="username" autocomplete="username" required autofocus>
+<label for="password">Password</label><input type="password" id="password" name="password" autocomplete="current-password" required>
+<button class="btn" type="submit">Sign in securely</button></form>
+<script src="{{ url_for('static', filename='vendor/motion.js') }}" defer></script><script src="{{ url_for('static', filename='admin.js') }}" defer></script></body></html>

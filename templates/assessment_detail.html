@@ -1,0 +1,10 @@
+{% extends 'base.html' %}
+{% block title %}{{ a.type }} session {{ a.session_no }} · {{ client.first_name }} {{ client.last_name }}{% endblock %}
+{% block content %}
+<div class="heading reveal"><div><div class="muted"><a href="{{ url_for('main.client_detail', slug=client.slug) }}">← {{ client.first_name }} {{ client.last_name }}</a></div><h1>{{ 'Outcome Rating Scale (ORS)' if a.type == 'ORS' else 'Session Rating Scale (SRS)' }}</h1><div class="id">{{ client.slug }} · Session {{ a.session_no }} · {{ a.taken_on }} · received {{ a.created_at|local }}</div></div>
+<div class="actions-row noprint"><button class="btn light" type="button" data-print>Print</button>
+<form class="inline" method="post" action="{{ url_for('main.delete_assessment', assessment_id=a.id) }}" data-confirm="Delete this assessment? This cannot be undone."><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn danger" type="submit">Delete assessment</button></form></div></div>
+<section class="panel reveal"><h2>Total {{ '%.2f'|format(a.total) }} <span class="muted">out of 40</span></h2><p class="muted">Each line shows where the client placed the mark between the left end (0) and the right end (10).</p>
+{% for item, v in a.ordered_scores %}<div class="bar-row"><div><strong>{{ item }}</strong> <span class="{{ 'low' if item in low }}">{{ '%.2f'|format(v) }} / 10{{ ' (below 9)' if item in low }}</span></div>
+<svg class="bar" viewBox="0 0 300 36" role="img" aria-label="{{ item }}: {{ '%.2f'|format(v) }} out of 10"><line class="base" x1="10" x2="290" y1="18" y2="18"/>{% for i in range(11) %}<line class="tickline" x1="{{ 10 + i * 28 }}" x2="{{ 10 + i * 28 }}" y1="13" y2="23"/>{% endfor %}<line class="fill" x1="10" x2="{{ 10 + v * 28 }}" y1="18" y2="18"/><rect class="stop" x="{{ 10 + v * 28 - 3 }}" y="8" width="6" height="20" rx="2"/></svg></div>{% endfor %}</section>
+{% endblock %}

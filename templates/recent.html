@@ -1,0 +1,13 @@
+{% extends 'base.html' %}
+{% block title %}Recent assessments · PCOMS{% endblock %}
+{% block content %}
+<div class="heading reveal"><div><h1>Recent assessments</h1><div class="muted">Newest first. Scores are visible only after administrator sign-in. Times follow the configured timezone.</div></div>
+<div class="actions-row"><a class="btn {{ '' if not kind else 'light' }}" href="{{ url_for('main.recent') }}">All</a><a class="btn {{ '' if kind == 'ORS' else 'light' }}" href="{{ url_for('main.recent', type='ORS') }}">ORS</a><a class="btn {{ '' if kind == 'SRS' else 'light' }}" href="{{ url_for('main.recent', type='SRS') }}">SRS</a></div></div>
+<section class="panel reveal">
+{% if page.items %}<div class="tablewrap"><table><thead><tr><th>Received</th><th>Client</th><th>Type</th><th>Session</th><th>Total</th><th></th></tr></thead><tbody>
+{% for a in page.items %}<tr class="reveal"><td>{{ a.created_at|local }}</td><td><a href="{{ url_for('main.client_detail', slug=a.client.slug) }}">{{ a.client.first_name }} {{ a.client.last_name }}</a><div class="id">{{ a.client.slug }}</div></td><td>{{ a.type }}</td><td class="num">{{ a.session_no }}</td><td class="num"><strong>{{ '%.2f'|format(a.total) }}</strong></td><td><a class="btn light" href="{{ url_for('main.assessment_detail', assessment_id=a.id) }}">View</a></td></tr>{% endfor %}
+</tbody></table></div>
+{% if page.pages > 1 %}<div class="pager">{% if page.has_prev %}<a href="{{ url_for('main.recent', page=page.prev_num, type=kind or None) }}">← Newer</a>{% endif %}<span class="muted">Page {{ page.page }} of {{ page.pages }}</span>{% if page.has_next %}<a href="{{ url_for('main.recent', page=page.next_num, type=kind or None) }}">Older →</a>{% endif %}</div>{% endif %}
+{% else %}<div class="empty">No assessments received yet. Open a client and create a session link.</div>{% endif %}
+</section>
+{% endblock %}

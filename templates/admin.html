@@ -1,0 +1,51 @@
+{% extends 'base.html' %}
+{% block title %}Clients · PCOMS{% endblock %}
+{% block content %}
+{% macro pager(page) %}{% if page.pages > 1 %}<div class="pager">{% if page.has_prev %}<a href="{{ filter_url(active, page=page.prev_num) }}">← Previous</a>{% endif %}<span class="muted">Page {{ page.page }} of {{ page.pages }} · {{ page.total }} clients</span>{% if page.has_next %}<a href="{{ filter_url(active, page=page.next_num) }}">Next →</a>{% endif %}</div>{% endif %}{% endmacro %}
+<div class="heading reveal"><div><h1>Clients</h1><div class="muted">Every client has a unique ID, one-time session links and a full in-portal record.</div></div>
+<div class="actions-row"><a class="btn light" href="{{ url_for('main.export_all') }}">Download all reports (.zip)</a><button class="btn" type="button" data-open="addClient">+ Add client</button></div></div>
+
+<div class="stats">
+<a class="stat reveal" href="{{ url_for('main.dashboard') }}"><b>{{ stats.total }}</b><span>Clients</span></a>
+<a class="stat warn reveal" href="{{ url_for('main.dashboard', attention='1') }}"><b>{{ stats.attention }}</b><span>Need attention</span></a>
+<a class="stat reveal" href="{{ url_for('main.dashboard', status='waiting') }}"><b>{{ stats.waiting }}</b><span>Awaiting client</span></a>
+</div>
+
+<section class="panel reveal">
+<form class="toolbar" method="get" data-clean action="{{ url_for('main.dashboard') }}">
+<input class="grow" type="search" name="q" value="{{ f.q }}" placeholder="Search name or client ID" aria-label="Search clients">
+<details class="filters"><summary>Filters{% if filter_count %}<span class="count">{{ filter_count }}</span>{% endif %}</summary>
+<div class="filter-pop"><div class="fgrid">
+<div><label for="f-attention">Needs attention</label><select id="f-attention" name="attention"><option value="">Any</option><option value="1" {{ 'selected' if f.attention == '1' }}>Needs attention</option><option value="0" {{ 'selected' if f.attention == '0' }}>No attention flag</option></select></div>
+<div><label for="f-status">Status</label><select id="f-status" name="status"><option value="">Any</option>{% for k, v in statuses.items() %}<option value="{{ k }}" {{ 'selected' if f.status == k }}>{{ v }}</option>{% endfor %}</select></div>
+<div><label for="f-band">Age band</label><select id="f-band" name="band"><option value="">Any</option><option value="adult" {{ 'selected' if f.band == 'adult' }}>Adult</option><option value="teen" {{ 'selected' if f.band == 'teen' }}>13 to 17</option></select></div>
+<div><label for="f-flag">Clinical flag</label><select id="f-flag" name="flag"><option value="">Any</option>{% for k, v in flag_options.items() %}<option value="{{ k }}" {{ 'selected' if f.flag == k }}>{{ v }}</option>{% endfor %}</select></div>
+<div class="full"><label for="f-sort">Sort by</label><select id="f-sort" name="sort">{% for k, v in sorts.items() %}<option value="{{ k }}" {{ 'selected' if f.sort == k }}>{{ v }}</option>{% endfor %}</select></div>
+</div><div class="filter-actions"><a class="btn light" href="{{ url_for('main.dashboard') }}">Clear all</a><button class="btn" type="submit">Apply filters</button></div></div></details>
+<button class="btn" type="submit">Search</button>
+</form>
+{% if chips %}<div class="active-filters"><span class="muted">Showing:</span>{% for k, label in chips.items() %}<span class="chip">{{ label }}<a href="{{ filter_url(active, drop=k) }}" aria-label="Remove filter {{ label }}">✕</a></span>{% endfor %}<a class="muted" href="{{ url_for('main.dashboard') }}">Clear all</a></div>{% endif %}
+
+{% if rows %}<div class="tablewrap"><table><thead><tr><th>Client</th><th>Status</th><th>Sessions</th><th>Last session</th><th>Latest ORS</th><th>Latest SRS</th><th>Flags</th><th></th></tr></thead><tbody>
+{% for r in rows %}{% set c = r.client %}<tr class="reveal {{ 'attn' if c.needs_attention }}">
+<td><a href="{{ url_for('main.client_detail', slug=c.slug) }}">{{ c.first_name }} {{ c.last_name }}</a>{% if c.needs_attention %} <span class="chip attn" tabindex="0" data-tip="Needs attention&#10;At least one reference flag is raised. Open the client for details.">Needs attention</span>{% endif %}<div class="id">{{ c.slug }}</div></td>
+<td><span class="chip {{ r.state }}">{{ statuses[r.state] }}</span></td>
+<td class="num">{{ c.session_count }}</td>
+<td>{{ c.last_session_on or '—' }}</td>
+<td class="num">{{ '%.2f'|format(c.ors_latest) if c.ors_latest is not none else '—' }}</td>
+<td class="num">{{ '%.2f'|format(c.srs_latest) if c.srs_latest is not none else '—' }}</td>
+<td class="wrap">{% for fl in c.flag_list %}<span class="chip {{ fl.level }}" tabindex="0" data-tip="{{ fl.tip }}">{{ fl.short }}</span>{% else %}<span class="muted">—</span>{% endfor %}</td>
+<td><a class="btn light" href="{{ url_for('main.client_detail', slug=c.slug) }}">Open</a></td></tr>{% endfor %}
+</tbody></table></div>{{ pager(page) }}
+{% else %}<div class="empty">{% if chips %}No clients match these filters. <a href="{{ url_for('main.dashboard') }}">Clear all</a>{% else %}No clients yet. Use “Add client” to create the first one.{% endif %}</div>{% endif %}
+</section>
+
+<dialog class="drawer" id="addClient" {{ 'data-autoopen' if request.args.get('new') }} aria-labelledby="addTitle">
+<div class="drawer-head"><div><h2 id="addTitle">Add a client</h2><p class="muted">The client ID is built from first and last name. A repeated name gets a numeric suffix automatically.</p></div><button class="icon-btn" type="button" data-close aria-label="Close">✕</button></div>
+<form method="post" action="{{ url_for('main.create_client') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+<div class="field"><label for="first_name">First name *</label><input id="first_name" name="first_name" required maxlength="80" autocomplete="off"></div>
+<div class="field"><label for="last_name">Last name *</label><input id="last_name" name="last_name" required maxlength="80" autocomplete="off"></div>
+<div class="field"><label for="age_band">Age band (sets the ORS cutoff)</label><select id="age_band" name="age_band"><option value="adult">Adult (cutoff 25)</option><option value="teen">13 to 17 (cutoff 28)</option></select></div>
+<button class="btn" type="submit">Create client</button></form>
+</dialog>
+{% endblock %}

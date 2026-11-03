@@ -1,0 +1,53 @@
+{% extends 'base.html' %}
+{% block title %}{{ client.first_name }} {{ client.last_name }} · PCOMS{% endblock %}
+{% block content %}
+<div class="heading reveal"><div><div class="muted"><a href="{{ url_for('main.dashboard') }}">← All clients</a></div>
+<h1>{{ client.first_name }} {{ client.last_name }} {% if client.needs_attention %}<span class="chip attn">Needs attention</span>{% endif %}</h1>
+<div class="id">{{ client.slug }} · {{ 'Age 13 to 17' if client.age_band == 'teen' else 'Adult' }} · ORS cutoff {{ ors_cutoff }}</div></div>
+<div class="actions-row noprint"><a class="btn" href="{{ url_for('main.report', slug=client.slug) }}">View report</a><a class="btn light" href="{{ url_for('main.export_client', slug=client.slug) }}">Download .xlsx</a><button class="btn light" type="button" data-print>Print</button>
+<form class="inline" method="post" action="{{ url_for('main.delete_client', slug=client.slug) }}" data-confirm="Permanently delete this client and ALL their assessments? This cannot be undone."><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn danger" type="submit">Delete client</button></form></div></div>
+
+<section class="panel reveal"><h2>Reference flags</h2><p class="muted">Aids for clinical judgement, not diagnoses. Hover a flag for its definition.</p>
+{% for f in flags %}<span class="chip {{ f.level }}" tabindex="0" data-tip="{{ f.tip }}">{{ f.text }}</span>{% else %}<span class="muted">Nothing to flag.</span>{% endfor %}</section>
+
+<section class="panel reveal noprint" id="linkpanel" data-state="{{ state }}" data-url="{{ url_for('main.client_activity', slug=client.slug) }}"><h2>Session link</h2>
+<p class="status" id="linkstate">{{ link_text }}</p>
+<p class="muted">A link works once: it closes by itself when the client submits everything requested, or after 7 days. Creating a new link replaces any unused one.</p>
+<form method="post" action="{{ url_for('main.create_link', slug=client.slug) }}" class="toolbar"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><select name="kinds" aria-label="Forms to include" class="kinds"><option value="ORS,SRS">ORS and SRS</option><option value="ORS">ORS only</option><option value="SRS">SRS only</option></select><button class="btn" type="submit">Create session link</button>
+{% if link_active %}<button class="btn danger" type="submit" formaction="{{ url_for('main.revoke_links', slug=client.slug) }}">Revoke active link</button>{% endif %}</form></section>
+
+{% if summary.sessions %}<section class="panel reveal"><h2>Clinical summary</h2>
+<div class="cards">
+<div class="card"><h3>Sessions</h3><div class="big">{{ summary.sessions }}</div><div class="muted">{{ summary.first }} to {{ summary.last }}{% if summary.days %} · {{ summary.days }} day{{ 's' if summary.days != 1 }}{% endif %}</div></div>
+{% if summary.ors %}{% set o = summary.ors %}<div class="card"><h3>ORS (out of 40)</h3><div class="big">{{ '%g'|format(o.latest) }}</div><div class="muted">Intake {{ '%g'|format(o.intake) }} → latest {{ '%g'|format(o.latest) }}{% if o.count > 1 %} · <span class="{{ 'up' if o.delta > 0 else 'down' if o.delta < 0 }}">{{ '%+g'|format(o.delta) }}</span>{% endif %}</div>
+<div class="muted"><strong>{{ o.label }}.</strong> {{ 'At or above' if o.above else 'Below' }} the cutoff of {{ ors_cutoff }}.</div></div>{% endif %}
+{% if summary.srs %}{% set s = summary.srs %}<div class="card"><h3>SRS (out of 40)</h3><div class="big">{{ '%g'|format(s.latest) }}</div><div class="muted">Average {{ s.mean }} over {{ s.count }} session{{ 's' if s.count != 1 }}{% if s.below %} · {{ s.below }} below {{ 36 }}{% endif %}</div>{% if s.low_items %}<div class="muted low">Latest: {{ s.low_items|join(', ') }} below 9</div>{% endif %}</div>{% endif %}
+</div></section>{% endif %}
+
+<div class="two">
+<section class="panel reveal"><h2>ORS total by session</h2>{% if charts.ors %}{{ charts.ors }}
+<div class="legend"><span><span class="g">▲</span> Reliable improvement</span><span><span class="b">▼</span> Reliable decline</span><span><span class="f">●</span> No reliable change</span><span><span class="sw zone"></span>Below cutoff ({{ ors_cutoff }})</span><span><span class="sw band"></span>Within ±5 of intake</span></div>{% else %}<div class="empty">No ORS recorded yet.</div>{% endif %}</section>
+<section class="panel reveal"><h2>SRS total by session</h2>{% if charts.srs %}{{ charts.srs }}
+<div class="legend"><span><span class="f">●</span> Session total</span><span><span class="b">◯</span> A line below 9</span><span><span class="sw zone"></span>Below 36</span></div>{% else %}<div class="empty">No SRS recorded yet.</div>{% endif %}</section>
+</div>
+
+{% if charts.domains %}<section class="panel reveal"><h2>ORS domains by session</h2><p class="muted">Each line is one domain (0 to 10). Hover a session to read all four.</p>
+<div class="two"><div>{{ charts.domains }}<div class="legend"><span><span class="l1">●</span> Individually</span><span><span class="l2">■</span> Interpersonally</span><span><span class="l3">◆</span> Socially</span><span><span class="l4">▲</span> Overall</span></div></div>
+<div>{% if domains %}<div class="tablewrap"><table><thead><tr><th>Domain</th><th>Intake</th><th>Latest</th><th>Change</th></tr></thead><tbody>{% for item, first, latest, change in domains %}<tr><td>{{ item }}</td><td class="num">{{ '%g'|format(first) }}</td><td class="num">{{ '%g'|format(latest) }}</td><td class="num {{ 'up' if change > 0 else 'down' if change < 0 }}">{{ '%+g'|format(change) }}</td></tr>{% endfor %}</tbody></table></div>
+<p class="muted">Raw differences between the first and latest ORS. Reliable-change thresholds are defined for the total score only.</p>{% else %}<p class="muted">Domain changes appear once there are two ORS results.</p>{% endif %}</div></div></section>{% endif %}
+
+<section class="panel reveal"><h2>Sessions</h2>
+{% if sessions %}<div class="tablewrap"><table><thead><tr><th>Session</th><th>Date</th><th>ORS total</th><th>ORS items</th><th>SRS total</th><th>SRS items</th></tr></thead><tbody>
+{% for s in sessions %}<tr><td><strong>{{ s.no }}</strong></td><td>{{ s.date }}</td>
+{% for kind in ('ORS', 'SRS') %}{% set a = s[kind] %}{% if a %}<td class="num"><strong>{{ '%.2f'|format(a.total) }}</strong></td><td class="num">{% for item, v in a.ordered_scores %}<span data-tip="{{ item }}">{{ '%.2f'|format(v) }}</span>{{ ' · ' if not loop.last }}{% endfor %} <a class="btn light noprint" href="{{ url_for('main.assessment_detail', assessment_id=a.id) }}">View</a></td>{% else %}<td>—</td><td class="muted">—</td>{% endif %}{% endfor %}</tr>{% endfor %}
+</tbody></table></div><p class="muted">Item order: ORS Individually · Interpersonally · Socially · Overall. SRS Relationship · Goals and Topics · Method/Approach · Overall.</p>
+{% else %}<div class="empty">No assessments yet. Create a session link above and send it to the client.</div>{% endif %}</section>
+
+<section class="panel reveal noprint"><details class="how"><summary>How to read these charts and flags</summary><ul>
+<li><strong>ORS</strong> is scored 0 to 40 (four lines of 0 to 10). Below the cutoff ({{ ors_cutoff }} here: 25 for adults, 28 for ages 13 to 17) is the clinical range, shaded red.</li>
+<li><strong>Reliable change</strong> is a move of 5 points or more from the first ORS (intake). The blue band shows the ±5 zone around intake: points outside it are reliable change. Some publishers use 6, so confirm for your training.</li>
+<li><strong>Clinically significant improvement</strong> is a reliable improvement that also crosses from below to above the cutoff. It is marked ▲ with a ring.</li>
+<li><strong>SRS</strong> is scored 0 to 40. A total below 36, or any single line below 9, is a prompt to invite the client to comment on the session; it is not a diagnosis. A ring marks sessions with a line below 9.</li>
+<li>These charts describe results; they do not predict outcomes. Early-session change guidance is contested, so no "on track" verdict is shown.</li>
+<li>Sources: <a href="https://tpcjournal.nbcc.org/Journal/Vol06iss01/28" rel="noreferrer noopener" target="_blank">NBCC, Miller and Duncan ORS/SRS cutoffs</a>; <a href="https://www.corc.uk.net/outcome-experience-measures/outcome-rating-scale-ors-child-outcome-rating-scale-cors/" rel="noreferrer noopener" target="_blank">CORC, ORS</a>; <a href="https://greenspacehealth.com/outcome-rating-scale-ors/" rel="noreferrer noopener" target="_blank">Greenspace, ORS reliable change</a>.</li></ul></details></section>
+{% endblock %}

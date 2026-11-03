@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><meta name="referrer" content="no-referrer"><title>Assessment</title>
+<script src="{{ url_for('static', filename='theme.js') }}"></script><link rel="icon" href="data:,"><link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}"></head>
+<body class="cp" data-token="{{ token }}" data-pending="{{ pending|join(',') }}">
+<header class="top"><div><div class="brand">Session Assessment</div><div class="small">{{ client.first_name }} {{ client.last_name }}</div></div><div class="small">Your responses are confidential</div></header>
+<main class="shell"><section class="panel">
+<h1 id="formTitle">Outcome Rating Scale (ORS)</h1><p class="notice" id="intro">Looking back over the last week, including today, rate how you have been doing in the following areas.</p>
+<p class="notice">Your personal assessment link securely identifies your record. No client ID or score is displayed.</p>
+<div class="tabs"><button class="tab active" type="button" data-type="ORS">ORS</button><button class="tab" type="button" data-type="SRS">SRS</button></div>
+<div id="items"></div>
+<div class="actions"><button class="btn-lite" type="button" id="resetBtn">Clear marks</button><button class="primary" type="button" id="saveBtn">Finish assessment</button></div>
+<div id="message" class="toast hidden" role="status"></div>
+<p class="notice after">Please place your mark on each line. This view does not display numerical scores.</p>
+</section><div class="footer"><span class="small">Your responses are sent securely to your practitioner.</span></div></main>
+<script src="{{ url_for('static', filename='assessment.js') }}" defer></script></body></html>

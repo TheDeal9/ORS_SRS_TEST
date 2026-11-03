@@ -1,0 +1,841 @@
+"""ORS/SRS private assessment portal.
+
+Clients open a one-time session link and mark the scales; scores are computed on
+the server and are only ever shown to the signed-in administrator.
+Run `python app.py setup` once to store the login in a git-ignored .env; `hash-password` makes the hash for a host.
+"""
+import hashlib
+import io
+import os
+import re
+import secrets
+import sqlite3
+import sys
+import unicodedata
+import zipfile
+from datetime import datetime, timedelta, timezone
+from functools import wraps
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+import pyexcel
+from flask import (Blueprint, Flask, abort, current_app, flash, jsonify, redirect,
+                   render_template, request, send_file, session, url_for)
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from flask_sqlalchemy import SQLAlchemy
+from flask_wtf.csrf import CSRFProtect
+from openpyxl import load_workbook
+from sqlalchemy import case, event, exists, func, inspect, or_, select
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import aliased
+from werkzeug.middleware.proxy_fix import ProxyFix
+from werkzeug.security import check_password_hash, generate_password_hash
+
+import scoring
+from charts import domains_svg, trend_svg
+
+BASE = Path(__file__).resolve().parent
+XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+PER_PAGE = 20
+CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; "
+       "font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+
+db = SQLAlchemy()
+csrf = CSRFProtect()
+# ponytail: in-memory counters are per process; fine for one gunicorn worker, use a shared store if scaled out
+limiter = Limiter(get_remote_address, storage_uri='memory://')
+bp = Blueprint('main', __name__)
+
+
+@event.listens_for(Engine, 'connect')
+def _sqlite_foreign_keys(dbapi_conn, _record):
+    if isinstance(dbapi_conn, sqlite3.Connection):  # SQLite ignores FKs unless asked
+        dbapi_conn.execute('PRAGMA foreign_keys=ON')
+
+
+def utcnow():
+    return datetime.now(timezone.utc).replace(tzinfo=None)  # naive UTC everywhere
+
+
+# ---------------------------------------------------------------- models
+
+class Client(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    slug = db.Column(db.String(200), unique=True, nullable=False)  # the unique Client ID, e.g. jane-patel-2; every lookup uses it
+    first_name = db.Column(db.String(80), nullable=False)
+    last_name = db.Column(db.String(80), nullable=False)
+    age_band = db.Column(db.String(10), nullable=False, default='adult')
+    created_at = db.Column(db.DateTime, nullable=False, default=utcnow, index=True)
+    # Summary, rewritten by refresh_summary() on every assessment change, so the client list can
+    # filter, sort and page in SQL without loading anyone's assessments.
+    session_count = db.Column(db.Integer, nullable=False, default=0)
+    last_session_on = db.Column(db.Date, index=True)
+    ors_latest = db.Column(db.Float)
+    srs_latest = db.Column(db.Float)
+    flag_codes = db.Column(db.String(120), nullable=False, default='')  # ',ors_low,srs_low,' so LIKE '%,code,%' matches whole codes
+    needs_attention = db.Column(db.Boolean, nullable=False, default=False, index=True)
+    links = db.relationship('Link', back_populates='client', cascade='all, delete-orphan')
+    assessments = db.relationship('Assessment', back_populates='client', cascade='all, delete-orphan',
+                                  order_by='Assessment.session_no, Assessment.type')
+
+    @property
+    def flag_list(self):
+        return [scoring.flag_chip(c, self.age_band) for c in self.flag_codes.strip(',').split(',') if c]
+
+
+class Link(db.Model):
+    """One-time session link. Only the SHA-256 of the token is stored."""
+    id = db.Column(db.Integer, primary_key=True)
+    client_pk = db.Column(db.Integer, db.ForeignKey('client.id'), nullable=False, index=True)
+    token_hash = db.Column(db.String(64), unique=True, nullable=False)
+    kinds = db.Column(db.String(10), nullable=False)  # 'ORS', 'SRS' or 'ORS,SRS'
+    session_no = db.Column(db.Integer)  # assigned at first submission
+    created_at = db.Column(db.DateTime, nullable=False, default=utcnow)
+    expires_at = db.Column(db.DateTime, nullable=False)
+    revoked_at = db.Column(db.DateTime)
+    completed_at = db.Column(db.DateTime)
+    client = db.relationship('Client', back_populates='links')
+    assessments = db.relationship('Assessment', back_populates='link')
+
+    def status(self):
+        if self.completed_at:
+            return 'completed'
+        if self.revoked_at:
+            return 'revoked'
+        if self.expires_at <= utcnow():
+            return 'expired'
+        return 'active'
+
+
+class Assessment(db.Model):
+    __table_args__ = (db.UniqueConstraint('client_pk', 'session_no', 'type'),)
+    id = db.Column(db.Integer, primary_key=True)
+    client_pk = db.Column(db.Integer, db.ForeignKey('client.id'), nullable=False, index=True)
+    link_pk = db.Column(db.Integer, db.ForeignKey('link.id'), index=True)
+    session_no = db.Column(db.Integer, nullable=False)
+    type = db.Column(db.String(3), nullable=False)  # 'ORS' or 'SRS'
+    taken_on = db.Column(db.Date, nullable=False)
+    scores = db.Column(db.JSON, nullable=False)  # {canonical item name: 0-10}
+    created_at = db.Column(db.DateTime, nullable=False, default=utcnow, index=True)
+    client = db.relationship('Client', back_populates='assessments')
+    link = db.relationship('Link', back_populates='assessments')
+
+    @property
+    def total(self):
+        return scoring.total(self.scores)
+
+    @property
+    def ordered_scores(self):
+        return [(item, self.scores[item]) for item in scoring.ITEMS[self.type]]
+
+
+# ---------------------------------------------------------------- helpers
+
+def make_slug(value):
+    value = unicodedata.normalize('NFKD', value).encode('ascii', 'ignore').decode().lower()
+    return re.sub(r'[^a-z0-9]+', '-', value).strip('-') or 'client'
+
+
+def hash_token(token):
+    return hashlib.sha256(str(token).encode()).hexdigest()
+
+
+def today_local():
+    return datetime.now(ZoneInfo(current_app.config['TIMEZONE'])).date()
+
+
+def find_active_link(token):
+    link = Link.query.filter_by(token_hash=hash_token(token)).first()
+    return link if link and link.status() == 'active' else None
+
+
+def submitted_kinds(link):
+    return {a.type for a in link.assessments}
+
+
+def latest_link(client):
+    return max(client.links, key=lambda link: link.id, default=None)
+
+
+def next_session_no(client_pk, kind, today):
+    """Next session number; an ORS and an SRS taken on the same day share one session."""
+    last = Assessment.query.filter_by(client_pk=client_pk).order_by(Assessment.session_no.desc()).first()
+    if last is None:
+        return 1
+    missing = Assessment.query.filter_by(client_pk=client_pk, session_no=last.session_no, type=kind).first() is None
+    return last.session_no if last.taken_on == today and missing else last.session_no + 1
+
+
+def sessions_of(assessments):
+    """Group assessments into sessions: [{'no','date','ORS','SRS','ors_total','srs_total'}]."""
+    by = {}
+    for a in assessments:
+        s = by.setdefault(a.session_no, {'no': a.session_no, 'date': a.taken_on, 'ORS': None, 'SRS': None})
+        s[a.type] = a
+        s['date'] = min(s['date'], a.taken_on)
+    out = []
+    for no in sorted(by):
+        s = by[no]
+        s['ors_total'] = s['ORS'].total if s['ORS'] else None
+        s['srs_total'] = s['SRS'].total if s['SRS'] else None
+        out.append(s)
+    return out
+
+
+def flags_for(client, sessions):
+    ors = [s['ors_total'] for s in sessions if s['ORS']]
+    srs = next((s['SRS'].scores for s in reversed(sessions) if s['SRS']), None)
+    return scoring.client_flags(client.age_band, ors, srs)
+
+
+def refresh_summary(client):
+    """Rewrite the client's summary columns from its assessments. Call before every commit that adds
+    or removes an assessment; `rebuild-summaries` repairs drift."""
+    rows = Assessment.query.filter_by(client_pk=client.id).order_by(Assessment.session_no, Assessment.type).all()
+    sessions = sessions_of(rows)
+    flags = flags_for(client, sessions)
+    client.session_count = len(sessions)
+    client.last_session_on = sessions[-1]['date'] if sessions else None
+    client.ors_latest = next((s['ors_total'] for s in reversed(sessions) if s['ORS']), None)
+    client.srs_latest = next((s['srs_total'] for s in reversed(sessions) if s['SRS']), None)
+    client.flag_codes = ',' + ','.join(f['code'] for f in flags) + ',' if flags else ''
+    client.needs_attention = any(f['level'] == 'warn' for f in flags)
+
+
+STATUS_LABELS = {'none': 'No link', 'waiting': 'Awaiting client', 'in_progress': 'In progress',
+                 'completed': 'Completed', 'expired': 'Expired', 'revoked': 'Revoked'}
+
+
+def link_state(link):
+    """The client list's Status column. Mirrors state_expr(), which does the same inside SQL for filtering."""
+    if link is None:
+        return 'none'
+    status = link.status()
+    if status != 'active':
+        return status
+    return 'in_progress' if link.assessments else 'waiting'
+
+
+def state_expr(latest):
+    return case((latest.id.is_(None), 'none'),
+                (latest.completed_at.isnot(None), 'completed'),
+                (latest.revoked_at.isnot(None), 'revoked'),
+                (latest.expires_at <= utcnow(), 'expired'),
+                (exists().where(Assessment.link_pk == latest.id), 'in_progress'),
+                else_='waiting')
+
+
+def link_message(link):
+    if link is None:
+        return 'No session link has been created yet.'
+    status = link.status()
+    if status == 'completed':
+        return f'Session {link.session_no} complete. The link has been used.'
+    if status in ('revoked', 'expired'):
+        return f'The last link was {status}.'
+    got = submitted_kinds(link)
+    waiting = ' and '.join(k for k in link.kinds.split(',') if k not in got)
+    if not got:
+        return f'Waiting for the client to complete {waiting}.'
+    return f'{" and ".join(sorted(got))} received. Waiting for {waiting}.'
+
+
+def activity_state(client):
+    """Changes whenever the client page should refresh (new result or link state change)."""
+    link = latest_link(client)
+    return f'{len(client.assessments)}|{link.id}|{link.status()}' if link else f'{len(client.assessments)}|0|none'
+
+
+SORTS = {
+    'new': ('Newest first', lambda: [Client.created_at.desc(), Client.id.desc()]),
+    'name': ('Name A to Z', lambda: [func.lower(Client.first_name), func.lower(Client.last_name), Client.id]),
+    'recent': ('Last session, newest', lambda: [Client.last_session_on.desc().nulls_last(), Client.id.desc()]),
+    'ors': ('Lowest ORS first', lambda: [Client.ors_latest.asc().nulls_last(), Client.id]),
+    'attention': ('Needs attention first', lambda: [Client.needs_attention.desc(), Client.created_at.desc(), Client.id.desc()]),
+}
+
+
+def like(text):
+    return '%' + text.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%'
+
+
+def read_filters(args):
+    """Whitelist every filter value; anything unknown is ignored rather than trusted."""
+    def pick(name, allowed):
+        return args.get(name) if args.get(name) in allowed else ''
+    return {'q': args.get('q', '').strip()[:80], 'attention': pick('attention', ('1', '0')),
+            'status': pick('status', STATUS_LABELS), 'band': pick('band', scoring.ORS_CUTOFF),
+            'flag': pick('flag', scoring.FLAG_INFO), 'sort': pick('sort', SORTS) or 'new'}
+
+
+def client_select(f):
+    """SELECT of clients matching the filters. Status comes from each client's newest link."""
+    newest = select(Link.client_pk, func.max(Link.id).label('lid')).group_by(Link.client_pk).subquery()
+    latest = aliased(Link)
+    q = select(Client).outerjoin(newest, newest.c.client_pk == Client.id).outerjoin(latest, latest.id == newest.c.lid)
+    if f['q']:
+        q = q.where(or_(Client.slug.ilike(like(f['q']), escape='\\'),
+                        (Client.first_name + ' ' + Client.last_name).ilike(like(f['q']), escape='\\')))
+    if f['attention']:
+        q = q.where(Client.needs_attention.is_(f['attention'] == '1'))
+    if f['band']:
+        q = q.where(Client.age_band == f['band'])
+    if f['flag']:
+        q = q.where(Client.flag_codes.like(f'%,{f["flag"]},%'))  # safe: flag is a whitelisted code
+    if f['status']:
+        q = q.where(state_expr(latest) == f['status'])
+    return q
+
+
+def count_clients(**overrides):
+    f = {**read_filters({}), **overrides}
+    return db.session.scalar(select(func.count()).select_from(client_select(f).subquery()))
+
+
+def report_tables(client):
+    """The PCOMS workbook as {'ORS': (header, rows), 'SRS': ..., 'Total': ...}, read back through
+    pyexcel so the portal shows what the download contains."""
+    n = len(sessions_of(client.assessments))
+    book = pyexcel.get_book(file_type='xlsx', file_content=build_workbook(client).getvalue())
+    out = {}
+    for name in ('ORS', 'SRS'):
+        rows = [(r + [None] * 5)[:5] for r in book[name].to_array()]
+        out[name] = (rows[0], rows[1:1 + n])
+    # Excel computes the Total sheet from formulas, and a file written by code has no cached results,
+    # so work out the same sums here (date, ORS sum, SRS sum) from the sheets just read.
+    def tot(row):
+        nums = [v for v in row[1:5] if isinstance(v, (int, float))]
+        return round(sum(nums), 2) if nums else None
+    out['Total'] = (['Date', 'ORS Total', 'SRS Total'],
+                    [[o[0] or s[0], tot(o), tot(s)] for o, s in zip(out['ORS'][1], out['SRS'][1])])
+    return out
+
+
+def build_workbook(client):
+    """Fill the PCOMS template from the database. One row per session. Returns BytesIO."""
+    wb = load_workbook(current_app.config['TEMPLATE_FILE'])
+    for name in ('ORS', 'SRS'):
+        ws = wb[name]
+        for row in range(2, ws.max_row + 1):
+            for col in range(1, 6):
+                ws.cell(row, col).value = None
+    total = wb['Total']
+    for row in range(2, total.max_row + 1):
+        for col in range(1, 4):
+            total.cell(row, col).value = None
+    for row, s in enumerate(sessions_of(client.assessments), start=2):
+        for kind in ('ORS', 'SRS'):
+            if s[kind]:
+                ws = wb[kind]
+                ws.cell(row, 1).value = s[kind].taken_on.isoformat()
+                for col, (_item, value) in enumerate(s[kind].ordered_scores, start=2):
+                    ws.cell(row, col).value = value
+        total.cell(row, 1).value = f'=IF(ORS!A{row}<>"",ORS!A{row},SRS!A{row})'
+        total.cell(row, 2).value = f'=IF(COUNT(ORS!B{row}:E{row})=0,"",SUM(ORS!B{row}:E{row}))'
+        total.cell(row, 3).value = f'=IF(COUNT(SRS!B{row}:E{row})=0,"",SUM(SRS!B{row}:E{row}))'
+    wb.properties.title = f'PCOMS report - {client.slug}'
+    wb.properties.subject = f'Client ID: {client.slug}'
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
+
+
+def admin_required(view):
+    @wraps(view)
+    def wrapper(*args, **kwargs):
+        if not session.get('admin'):
+            return redirect(url_for('main.admin_login'))
+        return view(*args, **kwargs)
+    return wrapper
+
+
+def get_client(slug):
+    return Client.query.filter_by(slug=slug).first_or_404()
+
+
+def error(message, status):
+    return jsonify(error=message), status
+
+
+# ---------------------------------------------------------------- public + client routes
+
+@bp.get('/')
+def index():
+    return render_template('landing.html')
+
+
+@bp.get('/health')
+def health():
+    return jsonify(status='ok')
+
+
+@bp.get('/client/<token>')
+def client_assessment(token):
+    link = find_active_link(token)
+    if not link:
+        return render_template('closed.html'), 404
+    got = submitted_kinds(link)
+    pending = [k for k in link.kinds.split(',') if k not in got]
+    return render_template('assessment.html', token=token, client=link.client, pending=pending)
+
+
+@bp.post('/api/save')
+@csrf.exempt  # authenticated by the one-time token in the body, not by a cookie
+def save_assessment():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return error('Invalid request.', 400)
+    link = find_active_link(data.get('token', ''))
+    if not link:
+        return error('This assessment link is no longer valid. Please contact your practitioner.', 403)
+    kind = data.get('type')
+    if kind not in link.kinds.split(','):
+        return error('Unknown assessment type.', 400)
+    try:
+        scores = scoring.scores_from_positions(kind, data.get('positions'))
+    except ValueError:
+        return error('Please mark all four scales before finishing.', 400)
+    link_id, client_pk = link.id, link.client_pk
+    for _attempt in range(3):  # a concurrent save can claim our session number; retry with a fresh one
+        link = db.session.get(Link, link_id)
+        if link.status() != 'active':
+            return error('This assessment link is no longer valid. Please contact your practitioner.', 403)
+        already = submitted_kinds(link)
+        if kind in already:
+            return error('This assessment has already been submitted.', 409)
+        today = today_local()
+        if link.session_no is None:
+            link.session_no = next_session_no(client_pk, kind, today)
+        done = (already | {kind}) >= set(link.kinds.split(','))
+        try:
+            db.session.add(Assessment(client_pk=client_pk, link_pk=link.id, session_no=link.session_no,
+                                      type=kind, taken_on=today, scores=scores))
+            if done:
+                link.completed_at = utcnow()
+            refresh_summary(db.session.get(Client, client_pk))  # its query flushes the insert, so a clash raises here
+            db.session.commit()
+            return jsonify(ok=True, done=done)
+        except IntegrityError:
+            db.session.rollback()
+    return error('Could not save right now. Please try again.', 409)
+
+
+# ---------------------------------------------------------------- admin auth
+
+@bp.route('/admin/login', methods=['GET', 'POST'])
+@limiter.limit('5 per minute', methods=['POST'])
+def admin_login():
+    if request.method == 'POST':
+        user_ok = secrets.compare_digest(request.form.get('username', '').encode(),
+                                         current_app.config['ADMIN_USERNAME'].encode())
+        pass_ok = check_password_hash(current_app.config['ADMIN_PASSWORD_HASH'], request.form.get('password', ''))
+        if user_ok and pass_ok:
+            session.clear()
+            session['admin'] = True
+            session.permanent = True
+            return redirect(url_for('main.dashboard'))
+        flash('Incorrect administrator ID or password.')
+    return render_template('login.html')
+
+
+@bp.post('/admin/logout')
+def admin_logout():
+    session.clear()
+    return redirect(url_for('main.admin_login'))
+
+
+# ---------------------------------------------------------------- admin: clients list + recent
+
+@bp.get('/admin')
+@admin_required
+def dashboard():
+    f = read_filters(request.args)
+    page = db.paginate(client_select(f).order_by(*SORTS[f['sort']][1]()),
+                       page=request.args.get('page', 1, type=int), per_page=PER_PAGE, error_out=False)
+    newest = {}
+    for link in Link.query.filter(Link.client_pk.in_([c.id for c in page.items])).order_by(Link.id):
+        newest[link.client_pk] = link  # ascending ids: the last one written is the newest
+    rows = [{'client': c, 'state': link_state(newest.get(c.id))} for c in page.items]
+    chips = {}  # one removable chip per active filter, in the order they appear in the panel
+    if f['q']:
+        chips['q'] = f'Search: {f["q"]}'
+    if f['attention']:
+        chips['attention'] = 'Needs attention' if f['attention'] == '1' else 'No attention flag'
+    if f['status']:
+        chips['status'] = f'Status: {STATUS_LABELS[f["status"]]}'
+    if f['band']:
+        chips['band'] = 'Age: ' + ('13 to 17' if f['band'] == 'teen' else 'Adult')
+    if f['flag']:
+        chips['flag'] = f'Flag: {scoring.FLAG_INFO[f["flag"]][3]}'
+    if f['sort'] != 'new':
+        chips['sort'] = f'Sort: {SORTS[f["sort"]][0]}'
+    active = {k: f[k] for k in chips}
+    stats = {'total': count_clients(), 'attention': count_clients(attention='1'), 'waiting': count_clients(status='waiting')}
+    return render_template('admin.html', rows=rows, page=page, f=f, chips=chips, active=active, stats=stats,
+                           filter_count=len([k for k in chips if k != 'q']), statuses=STATUS_LABELS,
+                           sorts={k: v[0] for k, v in SORTS.items()},
+                           flag_options={c: info[3] for c, info in scoring.FLAG_INFO.items()})
+
+
+@bp.get('/admin/recent')
+@admin_required
+def recent():
+    kind = request.args.get('type') if request.args.get('type') in scoring.ITEMS else ''
+    q = Assessment.query.order_by(Assessment.created_at.desc(), Assessment.id.desc())
+    if kind:
+        q = q.filter_by(type=kind)
+    page = q.paginate(page=request.args.get('page', 1, type=int), per_page=PER_PAGE, error_out=False)
+    return render_template('recent.html', page=page, kind=kind)
+
+
+@bp.post('/admin/clients')
+@admin_required
+def create_client():
+    first = ' '.join(request.form.get('first_name', '').split())
+    last = ' '.join(request.form.get('last_name', '').split())
+    band = request.form.get('age_band', 'adult')
+    problem = ('First name and last name are both required.' if not first or not last else
+               'Names must be 80 characters or fewer.' if len(first) > 80 or len(last) > 80 else
+               'Unknown age band.' if band not in scoring.ORS_CUTOFF else '')
+    if problem:
+        flash(problem)
+        return redirect(url_for('main.dashboard', new=1))  # reopen the add-client drawer
+    base = make_slug(first) + '-' + make_slug(last)
+    for n in range(1, 1000):  # the UNIQUE constraint is the source of truth; no check-then-insert race
+        candidate = base if n == 1 else f'{base}-{n}'
+        db.session.add(Client(slug=candidate, first_name=first, last_name=last, age_band=band))
+        try:
+            db.session.commit()
+            break
+        except IntegrityError:
+            db.session.rollback()
+    else:
+        abort(500)
+    flash(f'Client created. ID: {candidate}. Create a session link below when you are ready.')
+    return redirect(url_for('main.client_detail', slug=candidate))
+
+
+# ---------------------------------------------------------------- admin: one client
+
+def build_insight(client, sessions):
+    """Everything the client page shows beyond the table: chart points, summary cards, domain changes."""
+    band = client.age_band
+    cutoff = scoring.ORS_CUTOFF[band]
+    ors = [s for s in sessions if s['ORS']]
+    srs = [s for s in sessions if s['SRS']]
+    ors_points = []
+    for i, s in enumerate(ors):
+        v, first = s['ors_total'], ors[0]['ors_total']
+        status = scoring.ors_status(band, first, v) if i else None
+        tip = [f'Session {s["no"]} · {s["date"]}', f'ORS total {v:g} / 40']
+        if i:
+            tip.append(f'{round(v - first, 2):+g} since intake' + {'csc': ' · reliable and clinically significant improvement',
+                       'up': ' · reliable improvement', 'down': ' · reliable deterioration', None: ' · no reliable change'}[status])
+            tip.append(f'{round(v - ors[i - 1]["ors_total"], 2):+g} since previous session')
+        else:
+            tip.append('Intake (first ORS)')
+        tip.append(f'{"Below" if v < cutoff else "At or above"} the cutoff of {cutoff}')
+        ors_points.append({'no': s['no'], 'value': v, 'status': status, 'tip': '\n'.join(tip)})
+    srs_points = []
+    for s in srs:
+        v, scores = s['srs_total'], s['SRS'].scores
+        low = scoring.srs_low_items(scores)
+        tip = [f'Session {s["no"]} · {s["date"]}',
+               f'SRS total {v:g} / 40' + (f' · below {scoring.SRS_CUTOFF}' if v < scoring.SRS_CUTOFF else ''),
+               ' · '.join(f'{k} {scores[k]:g}' for k in scoring.SRS_ITEMS)]
+        if low:
+            tip.append(f'Below {scoring.SRS_ITEM_FLOOR}: ' + ', '.join(low))
+        srs_points.append({'no': s['no'], 'value': v, 'status': None, 'ring': bool(low), 'tip': '\n'.join(tip)})
+    summary = {'sessions': len(sessions), 'first': sessions[0]['date'] if sessions else None,
+               'last': sessions[-1]['date'] if sessions else None,
+               'days': (sessions[-1]['date'] - sessions[0]['date']).days if sessions else 0}
+    if ors:
+        first, latest = ors[0]['ors_total'], ors[-1]['ors_total']
+        status = scoring.ors_status(band, first, latest) if len(ors) > 1 else None
+        summary['ors'] = {'intake': first, 'latest': latest, 'delta': round(latest - first, 2), 'count': len(ors),
+                          'above': latest >= cutoff, 'status': status,
+                          'label': {'csc': 'Reliable and clinically significant improvement', 'up': 'Reliable improvement',
+                                    'down': 'Reliable deterioration', None: 'No reliable change yet' if len(ors) > 1 else 'Intake only'}[status]}
+    if srs:
+        last_scores = srs[-1]['SRS'].scores
+        summary['srs'] = {'latest': srs[-1]['srs_total'], 'count': len(srs), 'below': sum(1 for s in srs if s['srs_total'] < scoring.SRS_CUTOFF),
+                          'mean': round(sum(s['srs_total'] for s in srs) / len(srs), 1), 'low_items': scoring.srs_low_items(last_scores)}
+    domains = scoring.domain_changes('ORS', ors[0]['ORS'].scores, ors[-1]['ORS'].scores) if len(ors) > 1 else []
+    domain_rows = [{'no': s['no'], 'date': s['date'], 'scores': s['ORS'].scores} for s in ors]
+    charts = {'ors': trend_svg(ors_points, cutoff, 'ORS total by session',
+                               band=(ors[0]['ors_total'] - scoring.ORS_RELIABLE_CHANGE, ors[0]['ors_total'] + scoring.ORS_RELIABLE_CHANGE) if ors else None),
+              'srs': trend_svg(srs_points, scoring.SRS_CUTOFF, 'SRS total by session'),
+              'domains': domains_svg(domain_rows, scoring.ORS_ITEMS, 'ORS domains by session')}
+    return summary, domains, charts
+
+
+@bp.get('/admin/client/<slug>')
+@admin_required
+def client_detail(slug):
+    client = get_client(slug)
+    sessions = sessions_of(client.assessments)
+    summary, domains, charts = build_insight(client, sessions)
+    link = latest_link(client)
+    return render_template('client.html', client=client, sessions=sessions, flags=flags_for(client, sessions),
+                           summary=summary, domains=domains, charts=charts, link_text=link_message(link),
+                           state=activity_state(client), link_active=bool(link and link.status() == 'active'),
+                           ors_cutoff=scoring.ORS_CUTOFF[client.age_band])
+
+
+@bp.get('/admin/client/<slug>/activity.json')
+def client_activity(slug):
+    if not session.get('admin'):
+        abort(401)
+    return jsonify(state=activity_state(get_client(slug)))
+
+
+@bp.post('/admin/client/<slug>/links')
+@admin_required
+def create_link(slug):
+    client = get_client(slug)
+    kinds = request.form.get('kinds', 'ORS,SRS')
+    if kinds not in ('ORS,SRS', 'ORS', 'SRS'):
+        abort(400)
+    now = utcnow()
+    for old in client.links:  # one live link per client; a new one replaces the old
+        if old.status() == 'active':
+            old.revoked_at = now
+    token = secrets.token_urlsafe(24)
+    db.session.add(Link(client_pk=client.id, token_hash=hash_token(token), kinds=kinds,
+                        expires_at=now + timedelta(days=current_app.config['LINK_TTL_DAYS'])))
+    db.session.commit()
+    # shown once: only the hash is stored, so this is the admin's only chance to copy it
+    flash(url_for('main.client_assessment', token=token, _external=True), 'link')
+    return redirect(url_for('main.client_detail', slug=slug))
+
+
+@bp.post('/admin/client/<slug>/links/revoke')
+@admin_required
+def revoke_links(slug):
+    client = get_client(slug)
+    for link in client.links:
+        if link.status() == 'active':
+            link.revoked_at = utcnow()
+    db.session.commit()
+    flash('Session link revoked.')
+    return redirect(url_for('main.client_detail', slug=slug))
+
+
+@bp.post('/admin/client/<slug>/delete')
+@admin_required
+def delete_client(slug):
+    client = get_client(slug)
+    db.session.delete(client)  # cascades to links and assessments in one transaction
+    db.session.commit()
+    flash(f'Deleted client {slug} and all associated data.')
+    return redirect(url_for('main.dashboard'))
+
+
+# ---------------------------------------------------------------- admin: assessments + reports
+
+@bp.get('/admin/assessment/<int:assessment_id>')
+@admin_required
+def assessment_detail(assessment_id):
+    a = db.get_or_404(Assessment, assessment_id)
+    low = set(scoring.srs_low_items(a.scores)) if a.type == 'SRS' else set()
+    return render_template('assessment_detail.html', a=a, client=a.client, low=low)
+
+
+@bp.post('/admin/assessment/<int:assessment_id>/delete')
+@admin_required
+def delete_assessment(assessment_id):
+    a = db.get_or_404(Assessment, assessment_id)
+    client = a.client
+    db.session.delete(a)
+    db.session.flush()
+    refresh_summary(client)
+    db.session.commit()
+    flash('Assessment deleted.')
+    return redirect(url_for('main.client_detail', slug=client.slug))
+
+
+@bp.get('/admin/client/<slug>/report')
+@admin_required
+def report(slug):
+    client = get_client(slug)
+    return render_template('report.html', client=client, tables=report_tables(client))
+
+
+@bp.get('/admin/client/<slug>/export')
+@admin_required
+def export_client(slug):
+    client = get_client(slug)
+    return send_file(build_workbook(client), as_attachment=True, mimetype=XLSX,
+                     download_name=f'{client.slug}_PCOMS_report.xlsx')
+
+
+@bp.get('/admin/export-all')
+@admin_required
+def export_all():
+    mem = io.BytesIO()
+    with zipfile.ZipFile(mem, 'w', zipfile.ZIP_DEFLATED) as z:
+        for client in Client.query.order_by(Client.id):
+            z.writestr(f'{client.slug}_PCOMS_report.xlsx', build_workbook(client).getvalue())
+    mem.seek(0)
+    return send_file(mem, as_attachment=True, download_name='PCOMS_all_client_reports.zip', mimetype='application/zip')
+
+
+@bp.after_app_request
+def security_headers(resp):
+    h = resp.headers
+    h.setdefault('Content-Security-Policy', CSP)  # no inline script or style anywhere: all code is served from /static
+    h.setdefault('X-Frame-Options', 'DENY')
+    h.setdefault('Referrer-Policy', 'no-referrer')  # keeps the link token out of Referer
+    h.setdefault('X-Robots-Tag', 'noindex, nofollow')
+    h.setdefault('X-Content-Type-Options', 'nosniff')
+    h.setdefault('Permissions-Policy', 'camera=(), microphone=(), geolocation=()')
+    if request.is_secure:
+        h.setdefault('Strict-Transport-Security', 'max-age=31536000; includeSubDomains')
+    if request.path.startswith(('/admin', '/client', '/api')):
+        h['Cache-Control'] = 'no-store'
+    return resp
+
+
+# ---------------------------------------------------------------- local settings file (.env, git-ignored)
+
+ENV_FILE = BASE / '.env'
+
+
+def read_env(path=ENV_FILE):
+    """KEY=VALUE lines of a .env file as a dict. Blank lines and # comments are skipped; one pair of quotes is stripped."""
+    out = {}
+    for line in path.read_text().splitlines() if path.exists() else []:
+        if '=' in line and not line.lstrip().startswith('#'):
+            key, value = (part.strip() for part in line.split('=', 1))
+            out[key] = value[1:-1] if len(value) > 1 and value[0] == value[-1] and value[0] in '\'"' else value
+    return out
+
+
+def load_env(path=ENV_FILE):
+    """Copy .env into the process environment. A variable already set (Render, your shell) wins over the file."""
+    for key, value in read_env(path).items():
+        os.environ.setdefault(key, value)
+
+
+def write_env(updates, path=ENV_FILE):
+    """Set keys in a .env file and keep every other line. Values are single-quoted so a shell reads the `$` in a hash literally."""
+    lines = path.read_text().splitlines() if path.exists() else []
+    for key, value in updates.items():
+        new = f"{key}='{value}'"
+        at = next((i for i, line in enumerate(lines) if line.split('=', 1)[0].strip() == key), None)
+        if at is None:
+            lines.append(new)
+        else:
+            lines[at] = new
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # owner-only when the file is created
+    with os.fdopen(fd, 'w') as f:
+        f.write('\n'.join(lines) + '\n')
+
+
+def setup_env(password, username='admin', path=ENV_FILE):
+    """Local one-time setup: store the password HASH (never the password) and a session secret in .env.
+    An existing secret is kept so rerunning only changes the login."""
+    old = read_env(path)
+    write_env({'ORS_SRS_ADMIN_USERNAME': username,
+               'ORS_SRS_ADMIN_PASSWORD_HASH': generate_password_hash(password),
+               'ORS_SRS_SECRET_KEY': old.get('ORS_SRS_SECRET_KEY') or secrets.token_hex(32),
+               'ORS_SRS_ENV': old.get('ORS_SRS_ENV', 'dev')}, path)  # dev = Secure cookie off, so http://localhost login works
+
+
+def ask_password():
+    import getpass
+    password = getpass.getpass('New administrator password (8+ characters): ')
+    if len(password) < 8:
+        sys.exit('Too short. Nothing changed.')
+    if password != getpass.getpass('Repeat it: '):
+        sys.exit('The two entries differ. Nothing changed.')
+    return password
+
+
+# ---------------------------------------------------------------- app factory
+
+def database_url(url):
+    if not url:
+        (BASE / 'data').mkdir(exist_ok=True)
+        return 'sqlite:///' + str(BASE / 'data' / 'app.db')
+    for prefix in ('postgres://', 'postgresql://'):  # hosts hand out these; SQLAlchemy needs the driver named
+        if url.startswith(prefix):
+            return 'postgresql+psycopg://' + url[len(prefix):]
+    return url
+
+
+def create_app(config=None):
+    app = Flask(__name__)
+    env = os.environ.get
+    app.config.update(
+        SECRET_KEY=env('ORS_SRS_SECRET_KEY'),
+        ADMIN_USERNAME=env('ORS_SRS_ADMIN_USERNAME', 'admin'),
+        ADMIN_PASSWORD_HASH=env('ORS_SRS_ADMIN_PASSWORD_HASH'),
+        SQLALCHEMY_DATABASE_URI=database_url(env('DATABASE_URL')),
+        SQLALCHEMY_ENGINE_OPTIONS={'pool_pre_ping': True, 'pool_recycle': 300},  # serverless Postgres drops idle connections
+        TIMEZONE=env('ORS_SRS_TIMEZONE', 'UTC'),
+        TEMPLATE_FILE=env('PCOMS_TEMPLATE', str(BASE / 'PCOMS_template.xlsx')),
+        LINK_TTL_DAYS=7,
+        SESSION_COOKIE_SECURE=env('ORS_SRS_ENV') != 'dev',  # set ORS_SRS_ENV=dev to log in over plain http locally
+        SESSION_COOKIE_SAMESITE='Lax',
+        PERMANENT_SESSION_LIFETIME=timedelta(hours=8),
+        MAX_CONTENT_LENGTH=64 * 1024,
+        # Flask-WTF would also demand a Referer on every HTTPS POST, but Referrer-Policy: no-referrer (which keeps link
+        # tokens out of Referer) means browsers send none. The CSRF token itself is still checked on every POST.
+        WTF_CSRF_SSL_STRICT=False,
+    )
+    if config:
+        app.config.update(config)
+    if len(app.config['SECRET_KEY'] or '') < 16:
+        raise RuntimeError('ORS_SRS_SECRET_KEY must be set to a random string of at least 16 characters.')
+    if not re.match(r'^(scrypt|pbkdf2):', app.config['ADMIN_PASSWORD_HASH'] or ''):
+        raise RuntimeError('ORS_SRS_ADMIN_PASSWORD_HASH is missing or not a password hash. '
+                           'Run `python app.py hash-password` and see README.md.')
+    hops = int(env('ORS_SRS_PROXY_HOPS', '0'))
+    if hops:  # only trust X-Forwarded-* when actually behind that many proxies
+        app.wsgi_app = ProxyFix(app.wsgi_app, x_for=hops, x_proto=hops, x_host=hops)
+    db.init_app(app)
+    csrf.init_app(app)
+    limiter.init_app(app)
+    app.register_blueprint(bp)
+    @app.template_global()
+    def filter_url(active, drop=None, **extra):
+        """Clients-page URL with the active filters, minus `drop`, plus `extra` (for example page=2)."""
+        return url_for('main.dashboard', **{**{k: v for k, v in active.items() if k != drop}, **extra})
+
+    @app.template_filter('local')
+    def local(dt):
+        return dt.replace(tzinfo=timezone.utc).astimezone(ZoneInfo(app.config['TIMEZONE'])).strftime('%Y-%m-%d %H:%M') if dt else '—'
+
+    with app.app_context():
+        # ponytail: create_all only creates missing tables; adopt Alembic before the first schema change
+        db.create_all()
+        have = inspect(db.engine)
+        missing = {t.name: sorted({c.name for c in t.columns} - {c['name'] for c in have.get_columns(t.name)}) for t in db.metadata.sorted_tables}
+        missing = {t: cols for t, cols in missing.items() if cols}
+        if missing:  # an older database: fail loudly here rather than with a confusing error on the first request
+            raise RuntimeError(f'The database was created by an older version and lacks columns {missing}. Local dev: delete data/app.db. '
+                               'Production: back up, then migrate (see DEPLOY.md, "Updating the app").')
+    return app
+
+
+if __name__ == '__main__':
+    load_env()  # only here, never in create_app: tests and Render must not pick up a developer's .env
+    if sys.argv[1:] == ['setup']:
+        username = input('Administrator ID [admin]: ').strip() or 'admin'
+        setup_env(ask_password(), username)
+        print(f'Saved the login hash and a secret key to {ENV_FILE}. Start the app with: python app.py')
+    elif sys.argv[1:] == ['hash-password']:  # for a host such as Render, where you paste the hash into its settings
+        print(generate_password_hash(ask_password()))
+    elif sys.argv[1:] == ['rebuild-summaries']:  # repair the client list's summary columns after any manual data fix
+        app = create_app()
+        with app.app_context():
+            for c in Client.query:
+                refresh_summary(c)
+            db.session.commit()
+            print(f'Rebuilt {Client.query.count()} client summaries.')
+    else:
+        create_app().run(host='127.0.0.1', port=5000, debug=False)
