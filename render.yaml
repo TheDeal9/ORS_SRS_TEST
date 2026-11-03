@@ -1,0 +1,32 @@
+# Render Blueprint for the ORS/SRS portal: New -> Blueprint -> pick this repository.
+# Render pre-fills everything below and asks only for the three `sync: false` values.
+# Region: Singapore is the closest Render region to India (there is no India region); keep the Neon database in
+# Singapore too (aws-ap-southeast-1) so each page's database queries stay on the same network, not across oceans.
+services:
+  - type: web
+    name: ors-srs-portal
+    runtime: python
+    plan: free
+    region: singapore
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    # One worker on purpose: the login rate limiter keeps its counters in memory. No --access-logfile on purpose:
+    # the one-time client links are paths and must stay out of logs.
+    startCommand: gunicorn "app:create_app()" --workers 1 --threads 4 --bind 0.0.0.0:$PORT --timeout 60
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    envVars:
+      - key: PYTHON_VERSION  # the version the suite was run on (full x.y.z is required here)
+        value: 3.14.8
+      - key: ORS_SRS_PROXY_HOPS  # trust exactly one proxy hop: Render's load balancer
+        value: "1"
+      - key: ORS_SRS_TIMEZONE
+        value: Asia/Kolkata
+      - key: ORS_SRS_SECRET_KEY  # Render generates a random 256-bit value once; it is never in the repository
+        generateValue: true
+      - key: DATABASE_URL  # Neon DIRECT connection string (no -pooler), ending ?sslmode=require
+        sync: false
+      - key: ORS_SRS_ADMIN_USERNAME  # first administrator's ID; used only on the very first start
+        sync: false
+      - key: ORS_SRS_ADMIN_PASSWORD_HASH  # output of `python app.py hash-password`; used only on the very first start
+        sync: false

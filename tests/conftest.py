@@ -29,6 +29,7 @@ def make_app(tmp_path, **overrides):
     with app.app_context():
         db.drop_all()  # clean slate when pointing at a shared Postgres
         db.create_all()
+        app_module.seed_admin()  # create_app seeded the tables just dropped
     return app
 
 

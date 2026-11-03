@@ -29,6 +29,7 @@ Hard product constraints from the owner:
 | 2 In-portal view | clients list, client page, charts, report viewer | done |
 | 3 Close | strict CSP, keyboard and touch use, security headers, one-time hashed links | done |
 | 4 Deploy | steps written in `DEPLOY.md`, start command verified locally against Postgres; **not yet deployed** (needs the owner's GitHub, Neon and Render accounts) | ready |
+| 3b Auth v2 | admins in the database, recovery-code reset, account page, per-admin API keys, read-only `/api/v1`, `python app.py cli` | done |
 | 5 Operate | backup drill, typed delete confirmation, licence confirmation, consent text | open |
 
 Progress log and the original gap analysis live in the plan file at `~/.claude/plans/the-app-is-running-immutable-valley.md` (outside the repo).
@@ -37,7 +38,8 @@ Progress log and the original gap analysis live in the plan file at `~/.claude/p
 
 | Path | Role |
 |---|---|
-| `app.py` | Flask app factory `create_app()`, models, all routes, Excel export, report viewer, security headers. CLI: `python app.py setup` (writes git-ignored `.env`), `hash-password` (for a host), `rebuild-summaries`. `.env` is read only by this CLI entry point, never by `create_app()` or gunicorn. |
+| `render.yaml` | Render Blueprint (service, region, env vars). Secrets are `sync: false`, guarded by a test. |
+| `app.py` | Flask app factory `create_app()`, models, all routes, Excel export, report viewer, security headers. CLI (`python app.py <cmd>`, list with a bad command): `setup`, `create-admin`, `reset-password`, `admins`, `api-key`, `cli` (reads the JSON API with an API key), `hash-password` (for a host), `rebuild-summaries`. `.env` is read only by this CLI entry point, never by `create_app()` or gunicorn. Auth section of `app.py`: `Admin`/`ApiKey` helpers, `admin_required`, `api_required`; routes `/admin/login|logout|forgot|account*`, `/api/v1/*`. |
 | `scoring.py` | Pure logic, no Flask or DB: position to score, totals, reference flags and their stable codes, reliable-change rules. The single home of every clinical threshold. |
 | `charts.py` | Server-rendered SVG charts (total trend, ORS domains). Tooltips come from `data-tip` attributes plus `static/admin.js`. |
 | `templates/` | Jinja pages. `base.html` is the admin shell. Client-facing pages: `assessment.html`, `closed.html`. Auth/landing: `login.html`, `landing.html`. |
@@ -54,6 +56,8 @@ Progress log and the original gap analysis live in the plan file at `~/.claude/p
 
 - `Client`: `slug` (unique, indexed; this is the "Client ID" in the UI and in URLs), names, `age_band` (`adult` or `teen`), plus **summary columns kept in sync by `refresh_summary()`**: `session_count`, `last_session_on`, `ors_latest`, `srs_latest`, `flag_codes` (comma-delimited with outer commas, for example `,ors_low,srs_item,`), `needs_attention`. They let the clients list filter, sort and page in SQL.
 - `Link`: one-time session link. Stores only the SHA-256 of the token. `kinds` is `ORS`, `SRS` or `ORS,SRS`. Expires after 7 days, closes when every requested form is submitted, can be revoked. Only one active link per client (a new one revokes the old).
+- `Admin`: `username` (unique, lower-case), `password_hash`, `recovery_hash` (SHA-256 of a 96-bit code, nullable), `last_login_at`. `stamp` = first 16 hex of SHA-256(password_hash); the session cookie holds `aid` + `stamp`, so a password change ends every other session and SECRET_KEY alone cannot forge one. The first admin is seeded from `ORS_SRS_ADMIN_USERNAME` + `ORS_SRS_ADMIN_PASSWORD_HASH` **only while the table is empty** (`seed_admin`); afterwards the database wins and those variables are ignored.
+- `ApiKey`: per-admin read-only key (`ors_` + 43 chars), only SHA-256 stored, shown once, revocable, max 10 active per admin. Accepted only as `Authorization: Bearer` on `/api/v1/*`, which ignores cookies (that is why those routes need no CSRF). A password reset (recovery code or CLI) revokes all of the admin's keys.
 - `Assessment`: one ORS or SRS result. `scores` is JSON keyed by **canonical item names** (ORS: Individually, Interpersonally, Socially, Overall. SRS: Relationship, Goals and Topics, **Method/Approach**, Overall). The client page labels the third SRS line "Approach or Method"; the server maps by position, never by label. `UNIQUE(client_pk, session_no, type)`.
 - Sessions: an ORS and an SRS taken the same day share one session number, even from separate links (`next_session_no`). `session_no` is assigned at the first submission.
 - Status column on the clients list = state of each client's **newest** link: none, waiting, in_progress, completed, expired, revoked. `state_expr()` (SQL, used for filtering) and `link_state()` (Python, used for display) must always agree; a test enforces it.
@@ -71,7 +75,7 @@ Progress log and the original gap analysis live in the plan file at `~/.claude/p
 
 ## Security invariants (do not weaken; tests cover each)
 
-1. No default or hardcoded secrets. The app refuses to start without `ORS_SRS_SECRET_KEY` (16+ chars) and a real `ORS_SRS_ADMIN_PASSWORD_HASH`.
+1. No default or hardcoded secrets. The app refuses to start without `ORS_SRS_SECRET_KEY` (16+ chars), and, while no administrator exists, without a well-formed `ORS_SRS_ADMIN_PASSWORD_HASH` (shape-checked, because a shell that expands `$` corrupts hashes). Passwords, recovery codes and API keys are stored only as hashes; password 10+ chars.
 2. The server computes scores. The browser sends mark positions (0 to 1) only. No response or page for a client contains a score or the client's ID.
 3. CSRF on every admin POST (Flask-WTF). `/api/save` is exempt because the one-time token authenticates it. `WTF_CSRF_SSL_STRICT=False` is deliberate: with `Referrer-Policy: no-referrer` browsers send no Referer, and a strict check would reject every HTTPS POST (found and fixed during the deployment check; regression test exists).
 4. Login limited to 5 POSTs per minute per address. `ORS_SRS_PROXY_HOPS` must be `1` behind Render so the real visitor address and `https` scheme are used.
@@ -80,6 +84,7 @@ Progress log and the original gap analysis live in the plan file at `~/.claude/p
 7. Filter and sort inputs are whitelisted; search text is escaped for LIKE; names are length-capped on the server.
 8. Admin session cookie is Secure, HttpOnly, SameSite=Lax, 8 hours. `ORS_SRS_ENV=dev` turns Secure off for local http only.
 9. Client data never goes into logs, commits, test fixtures or chat output.
+10. Account changes (password, recovery code, API key) re-ask for the current password; login, forgot and those forms are limited to 5 POSTs a minute; unknown ID and wrong password give the same message and cost the same hash check. Forgot-password uses a recovery code, never email (no third-party services).
 
 ## Commands
 
@@ -87,13 +92,15 @@ Progress log and the original gap analysis live in the plan file at `~/.claude/p
 source .venv/bin/activate                         # Python 3.14 was used; .python-version says 3.14
 python -m pip install -r requirements-dev.txt
 
-python -m pytest                                  # whole suite (316 tests at time of writing, about 2 minutes)
+python -m pytest                                  # whole suite (414 tests at time of writing, about 2 minutes)
 python -m pytest tests/test_security.py -k csrf   # a slice
 TEST_DATABASE_URL='postgresql+psycopg://user@host:port/scratch_db' python -m pytest   # same suite on Postgres (drops its tables!)
 
-python app.py setup                               # asks for ID + password, writes hash, secret key and ORS_SRS_ENV=dev to .env (git-ignored, mode 600)
+python app.py setup                               # asks for ID + password; creates/resets the admin in the DB, writes secret key + ORS_SRS_ENV=dev to .env (git-ignored, mode 600), prints a recovery code once
 python app.py                                     # loads .env, then http://127.0.0.1:5000/admin/login
-python app.py hash-password                       # prints just a hash, to paste into a host's settings (single-quote it in a shell; $ is special)
+python app.py admins | create-admin ID | reset-password ID | api-key ID [label]   # manage administrators (works against any DATABASE_URL, no SECRET_KEY needed)
+ORS_SRS_API_KEY=ors_... python app.py cli me|clients|client ID|recent           # read a running portal through its API
+python app.py hash-password                       # prints just a hash for a host's first start (single-quote it in a shell; $ is special)
 python app.py rebuild-summaries                   # recompute Client summary columns (after manual data fixes or restores)
 
 gunicorn "app:create_app()" --workers 1 --threads 4 --bind 0.0.0.0:$PORT --timeout 60   # production start command
@@ -103,7 +110,7 @@ Configuration is environment variables (locally the same names may sit in `.env`
 
 ## Testing
 
-`TESTING.md` is the guide (commands, what each file covers, expected results, Postgres setup, a 14-step manual browser checklist). Test files: `test_scoring.py` (pure logic and charts), `test_security.py` (secrets, auth, CSRF, rate limit, headers, tokens), `test_flow.py` (client journey, one-time links, session numbering, races), `test_admin.py` (clients list, filters, summaries, client page, report viewer, deletes, Excel), `test_ui.py` (CSP compliance, dark mode contrast, motion, keyboard and chart markup). `conftest.py` has the fixtures (`app`, `admin`, `anon`) and helpers (`add_client`, `new_link`, `submit`, `complete_session`).
+`TESTING.md` is the guide (commands, what each file covers, expected results, Postgres setup, a 14-step manual browser checklist). Test files: `test_scoring.py` (pure logic and charts), `test_security.py` (secrets, route gating, CSRF, rate limit, headers, tokens, `.env` loader), `test_auth.py` (admin accounts, sessions, recovery, API keys, JSON API, CLI), `test_flow.py` (client journey, one-time links, session numbering, races), `test_admin.py` (clients list, filters, summaries, client page, report viewer, deletes, Excel), `test_ui.py` (CSP compliance, dark mode contrast, motion, keyboard and chart markup). `conftest.py` has the fixtures (`app`, `admin`, `anon`) and helpers (`add_client`, `new_link`, `submit`, `complete_session`).
 
 Rules for changes: run the full suite before saying work is done; add a test that fails without your change; when a test and the code disagree, work out which is wrong rather than loosening the test. The suite has been checked by deliberately breaking the code (mutation checks); keep it that way.
 
@@ -111,7 +118,7 @@ Browser checks (Playwright) were used for the slider, drawer, tooltips, dark mod
 
 ## Deployment (summary; steps in `DEPLOY.md`)
 
-GitHub private repo, Neon free Postgres (use the **direct** connection string, not `-pooler`), Render free web service with the gunicorn command above, env vars from `README.md`, `ORS_SRS_PROXY_HOPS=1`, health check `/health`. The free web service sleeps after 15 minutes (about 1 minute to wake) and has no permanent disk, so nothing important may be written to local files. The start command was verified locally against Postgres 18 with Render-style proxy headers.
+Repo `github.com/TheDeal9/ORS_SRS_TEST` (public at the time of writing; the owner is advised to make it private). `render.yaml` is the Render Blueprint: free web service in **Singapore** (nearest region to India; Render and Neon have none), gunicorn command above, health check `/health`, `ORS_SRS_PROXY_HOPS=1` (trust only the last `X-Forwarded-For` entry), `ORS_SRS_SECRET_KEY` generated by Render, and `DATABASE_URL` / `ORS_SRS_ADMIN_USERNAME` / `ORS_SRS_ADMIN_PASSWORD_HASH` as `sync: false` (typed in the dashboard; a test forbids hardcoding them). Neon free Postgres in `aws-ap-southeast-1`, **direct** connection string, not `-pooler`. Free Neon has 6 h history and no scheduled backups, so a monthly `pg_dump` is part of operations. Firestore and Atlas were weighed and rejected (rewrite cost, paid backups); see `DEPLOY.md` section 9. The free web service sleeps after 15 minutes (about 1 minute to wake) and has no permanent disk, so nothing important may be written to local files. The start command was verified locally against Postgres 18 with Render-style proxy headers.
 
 ## Conventions
 

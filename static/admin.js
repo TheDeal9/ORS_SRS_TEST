@@ -24,7 +24,7 @@
   /* ---- small behaviours ---- */
   $$('[data-copy]').forEach(function (b) {
     b.addEventListener('click', function () {
-      var done = function () { b.textContent = 'Link copied'; };
+      var done = function () { b.textContent = 'Copied'; };
       if (navigator.clipboard) navigator.clipboard.writeText(b.dataset.copy).then(done, function () { window.prompt('Copy this link:', b.dataset.copy); });
       else window.prompt('Copy this link:', b.dataset.copy);
     });

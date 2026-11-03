@@ -238,3 +238,5 @@ body.cp .footer { display: flex; justify-content: space-between; gap: 12px; alig
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 @media print { .top, .noprint, .btn, .copy, form, .tabs { display: none !important; } body { background: #fff; color: #000; } .panel { box-shadow: none; border: 1px solid #ccc; break-inside: avoid; } .shell { margin: 0; } .js .reveal { opacity: 1 !important; } .sheet-panel { display: block !important; } }
 dialog.drawer form > .btn { margin-top: 20px; width: 100%; }
+.card-page .hint { font-size: 13px; margin: 12px 0 0; }
+code { font: 12.5px ui-monospace, monospace; background: var(--soft); padding: 1px 5px; border-radius: 5px; }

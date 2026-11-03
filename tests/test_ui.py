@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import ORS_MARKS, SRS_MARKS, add_client, complete_session, new_link, submit
+from conftest import ORS_MARKS, PASSWORD, SRS_MARKS, add_client, complete_session, new_link, submit
 
 STATIC = Path(__file__).resolve().parent.parent / 'static'
 
@@ -29,17 +29,27 @@ def pages(app, admin, anon):
     with app.app_context():
         aid = Assessment.query.first().id
     html = lambda c, path: c.get(path).get_data(as_text=True)
-    return {
+    secret_page = admin.post('/admin/account/recovery', data={'current': PASSWORD}, follow_redirects=True).get_data(as_text=True)
+    code = re.search(r'value="([0-9a-f]{4}(?:-[0-9a-f]{4}){5})"', secret_page).group(1)
+    key_page = admin.post('/admin/account/keys', data={'label': 'laptop', 'current': PASSWORD}, follow_redirects=True).get_data(as_text=True)
+    out = {
         'landing': html(anon, '/'), 'login': html(anon, '/admin/login'), 'closed': html(anon, '/client/nope'),
         'assessment': html(anon, f'/client/{token}'), 'clients': html(admin, '/admin'), 'recent': html(admin, '/admin/recent'),
         'client': html(admin, f'/admin/client/{cid}'), 'detail': html(admin, f'/admin/assessment/{aid}'),
         'report': html(admin, f'/admin/client/{cid}/report'),
+        'forgot': html(anon, '/admin/forgot'), 'account': html(admin, '/admin/account'),
+        'account_secret': secret_page, 'account_key': key_page,
     }
+    # last, because resetting the password ends the admin's session
+    out['recovery_done'] = anon.post('/admin/forgot', data={'username': 'admin', 'code': code, 'password': 'another long password',
+                                                            'confirm': 'another long password'}).get_data(as_text=True)
+    return out
 
 
 # ---- strict CSP: nothing inline, nothing third-party ---------------------------------------------------
 
-PAGES = ['landing', 'login', 'closed', 'assessment', 'clients', 'recent', 'client', 'detail', 'report']
+PAGES = ['landing', 'login', 'closed', 'assessment', 'clients', 'recent', 'client', 'detail', 'report',
+         'forgot', 'account', 'account_secret', 'account_key', 'recovery_done']
 
 
 @pytest.mark.parametrize('name', PAGES)

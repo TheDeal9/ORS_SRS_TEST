@@ -17,26 +17,48 @@ python app.py setup                # asks for an administrator ID and password, 
 python app.py                      # http://127.0.0.1:5000/admin/login
 ```
 
-The app refuses to start without `ORS_SRS_SECRET_KEY` (16+ characters) and a valid `ORS_SRS_ADMIN_PASSWORD_HASH`. There is no default password.
+The app refuses to start without `ORS_SRS_SECRET_KEY` (16+ characters) and at least one administrator. There is no default password.
 
-### How sign-in works, and the `.env` file
+### How sign-in works
 
-- `python app.py setup` asks for an ID (default `admin`) and a password (8+ characters, typed twice). It writes **`.env`** in the project folder with: the ID, a **hash** of the password, a random session secret, and `ORS_SRS_ENV=dev` (lets login work over plain `http://localhost`).
-- The password itself is never stored anywhere. The hash cannot be turned back into the password, so a forgotten password means running `python app.py setup` again (it keeps your other `.env` lines and the session secret).
-- At login the server hashes what you typed and compares it with the stored hash. Five attempts per minute are allowed per address.
-- `.env` is git-ignored, created readable by you only, and read only when you start with `python app.py`. A variable already set in your shell or on a host wins over the file. Tests and gunicorn do not read it.
-- A host such as Render has no `.env`. There, run `python app.py hash-password` and paste the hash into the host's settings (see [DEPLOY.md](DEPLOY.md)).
-- An old password from the first prototype (`ORS_SRS_ADMIN_PASSWORD`) is no longer read by anything. Only the hash counts.
+- **Where logins live:** in the database, table `admin` (locally `data/app.db`, on Render your Neon database). It stores the ID, a **hash** of the password and a hash of the recovery code. The password itself is never stored, and a hash cannot be turned back into it. API keys are in table `api_key`, also as hashes only.
+- `python app.py setup` asks for an ID (default `admin`; use exactly the ID you choose when signing in) and a password (10+ characters, typed twice). It creates (or resets) that administrator in the database, writes **`.env`** with a session secret and `ORS_SRS_ENV=dev` (so login works over plain `http://localhost`), and prints a **recovery code** once.
+- At sign-in the server hashes what you typed and compares it with the stored hash. Five attempts per minute are allowed per address. The ID is not case-sensitive.
+- The session cookie carries the admin's id plus a stamp derived from the password hash. Changing the password signs every other browser out, and knowing `ORS_SRS_SECRET_KEY` alone is not enough to forge a session.
+- `.env` is git-ignored, created readable by you only, and read only when you start with `python app.py` (not by tests or gunicorn). A variable already set in your shell or on a host wins over the file.
+- On a host such as Render there is no `.env`: run `python app.py hash-password`, put the hash in `ORS_SRS_ADMIN_PASSWORD_HASH` (and the ID in `ORS_SRS_ADMIN_USERNAME`). They are used **once**, on the first start, to create the first administrator. After that the database is the source of truth and those two variables are ignored; change the password in the portal.
+- The first prototype's `ORS_SRS_ADMIN_PASSWORD` is no longer read by anything.
 
-**Windows:** `run_windows.bat` installs, runs `python app.py setup` the first time (when `.env` is missing), then starts the app (untested on Windows). Delete `.env` to set a new password that way, or run `python app.py setup` yourself.
+### Forgot your password
+
+1. **Recovery code (no email involved, nothing leaves the portal):** sign in once and open **Account** → *Create a recovery code*, and keep it safely. Later use **Forgot your password?** on the sign-in page: ID + code + new password. It signs everyone out, revokes your API keys and gives you a fresh code.
+2. **No code? From the computer that runs the app:** `python app.py reset-password <id>` (same effects). For the hosted app run it on your own computer against the production database: `DATABASE_URL='postgresql://...' python app.py reset-password <id>`.
+3. Change a known password under **Account** → *Change password*.
+
+### Command line and API keys
+
+Each administrator can have up to 10 API keys (Account page, or `python app.py api-key <id> [label]`). A key is shown once, stored hashed, can be revoked, and only **reads** the portal through `/api/v1/me`, `/clients`, `/clients/<id>`, `/recent` (send `Authorization: Bearer <key>`; browser cookies never work there). The built-in client:
+
+```bash
+export ORS_SRS_API_KEY=ors_...                       # or put it in .env
+export ORS_SRS_URL=http://127.0.0.1:5000             # default; use your https address for the hosted app
+python app.py cli me | clients [attention=1 status=waiting q=jane page=2] | client <id> | recent [type=ORS] [--json]
+```
+
+`ORS_SRS_SECRET_KEY` is not a login credential: it only signs cookies. Never use it as an API key.
+
+Other commands: `python app.py admins` (list administrators, no secrets), `create-admin <id>`, `reset-password <id>`, `api-key <id>`, `rebuild-summaries`, `hash-password`.
+
+**Windows:** `run_windows.bat` installs, runs `python app.py setup` the first time (when `.env` is missing), then starts the app (untested on Windows).
 
 ## Settings (environment variables, or the same names in `.env` when running locally)
 
 | Variable | Required | Meaning |
 |---|---|---|
 | `ORS_SRS_SECRET_KEY` | yes | Signs session cookies. 16+ random characters. |
-| `ORS_SRS_ADMIN_PASSWORD_HASH` | yes | Locally `python app.py setup` stores it in `.env`; on a host paste the output of `python app.py hash-password`. |
-| `ORS_SRS_ADMIN_USERNAME` | no | Default `admin`. |
+| `ORS_SRS_ADMIN_PASSWORD_HASH` | first start only | Used once to create the first administrator when the `admin` table is empty. Locally `python app.py setup` does this for you; on a host paste the output of `python app.py hash-password`. |
+| `ORS_SRS_ADMIN_USERNAME` | first start only | ID of that first administrator. Default `admin`. |
+| `ORS_SRS_API_KEY`, `ORS_SRS_URL` | for `python app.py cli` | Your API key and the portal address. |
 | `DATABASE_URL` | no | Default: SQLite at `data/app.db`. `postgres://` and `postgresql://` URLs are accepted. |
 | `ORS_SRS_TIMEZONE` | no | Default `UTC`. Set your own (for example `Asia/Kolkata`) so assessment dates and times follow your calendar day. |
 | `ORS_SRS_ENV` | no | `dev` turns off the Secure cookie flag so http://localhost works. |
@@ -68,4 +90,4 @@ Aids for clinical judgement, defined in `scoring.py`: ORS below 25 (13 to 17 yea
 
 ## Layout
 
-`app.py` routes, models, export. `scoring.py` pure scoring and flags. `charts.py` SVG charts. `templates/` pages. `static/` styles and scripts (`vendor/motion.js` is the vendored animation library). `tests/` the suite.
+`app.py` routes, models, export, command line. `render.yaml` Render Blueprint (Singapore, free plan, secrets asked for, never stored). `scoring.py` pure scoring and flags. `charts.py` SVG charts. `templates/` pages. `static/` styles and scripts (`vendor/motion.js` is the vendored animation library). `tests/` the suite.

@@ -1,0 +1,8 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>Password reset</title>
+<script src="{{ url_for('static', filename='theme.js') }}"></script><link rel="icon" href="data:,"><link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}"></head>
+<body class="center"><button class="icon-btn theme-corner" type="button" data-theme-toggle aria-pressed="false">Dark mode</button>
+<div class="card-page reveal"><h1>Password changed</h1><p>Your old recovery code no longer works. This is the new one. It is shown only once, so copy it now and keep it somewhere safe.</p>
+<div class="flash linkbox"><input readonly value="{{ code }}" data-select aria-label="New recovery code"><button class="copy" type="button" data-copy="{{ code }}">Copy</button></div>
+<a class="btn" href="{{ url_for('main.admin_login') }}">Continue to sign in</a></div>
+<script src="{{ url_for('static', filename='vendor/motion.js') }}" defer></script><script src="{{ url_for('static', filename='admin.js') }}" defer></script></body></html>

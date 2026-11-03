@@ -6,11 +6,11 @@
 </head><body>
 {% set ep = request.endpoint %}
 <header class="top"><a class="brand" href="{{ url_for('main.dashboard') }}">PCOMS · Private dashboard</a>
-<nav aria-label="Main"><a class="nav-link {{ 'on' if ep != 'main.recent' }}" href="{{ url_for('main.dashboard') }}">Clients</a><a class="nav-link {{ 'on' if ep == 'main.recent' }}" href="{{ url_for('main.recent') }}">Recent assessments</a>
+<nav aria-label="Main"><a class="nav-link {{ 'on' if ep != 'main.recent' and not (ep or '').startswith('main.account') }}" href="{{ url_for('main.dashboard') }}">Clients</a><a class="nav-link {{ 'on' if ep == 'main.recent' }}" href="{{ url_for('main.recent') }}">Recent assessments</a><a class="nav-link {{ 'on' if (ep or '').startswith('main.account') }}" href="{{ url_for('main.account') }}">Account</a>
 <button class="icon-btn" type="button" data-theme-toggle aria-pressed="false">Dark mode</button>
 <form class="inline" method="post" action="{{ url_for('main.admin_logout') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="linklike" type="submit">Sign out</button></form></nav></header>
 <main class="shell">
-{% for cat, msg in get_flashed_messages(with_categories=True) %}{% if cat == 'link' %}<div class="flash linkbox"><strong>One-time session link. It is shown only once, so copy it now and send it to the client.</strong><input readonly value="{{ msg }}" data-select><button class="copy" type="button" data-copy="{{ msg }}">Copy link</button></div>{% else %}<div class="flash">{{ msg }}</div>{% endif %}{% endfor %}
+{% for cat, msg in get_flashed_messages(with_categories=True) %}{% if cat == 'link' %}<div class="flash linkbox"><strong>One-time session link. It is shown only once, so copy it now and send it to the client.</strong><input readonly value="{{ msg }}" data-select><button class="copy" type="button" data-copy="{{ msg }}">Copy link</button></div>{% elif cat in ('recovery', 'apikey') %}<div class="flash linkbox"><strong>{{ 'New recovery code' if cat == 'recovery' else 'New API key' }}. It is shown only once, so copy it now and keep it somewhere safe.</strong><input readonly value="{{ msg }}" data-select><button class="copy" type="button" data-copy="{{ msg }}">Copy</button></div>{% else %}<div class="flash">{{ msg }}</div>{% endif %}{% endfor %}
 {% block content %}{% endblock %}
 </main>
 <script src="{{ url_for('static', filename='vendor/motion.js') }}" defer></script>

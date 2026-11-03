@@ -1,0 +1,34 @@
+{% extends 'base.html' %}
+{% block title %}Account · PCOMS{% endblock %}
+{% block content %}
+<div class="heading reveal"><div><h1>Account</h1>
+<div class="id">Signed in as <strong>{{ admin.username }}</strong> · created {{ admin.created_at|local }} · last sign-in {{ admin.last_login_at|local }}</div></div></div>
+
+<div class="two">
+<section class="panel reveal"><h2>Change password</h2>
+<p class="muted">Other browsers signed in as you are signed out. {{ min_len }} or more characters.</p>
+<form method="post" action="{{ url_for('main.account_password') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="text" name="username" value="{{ admin.username }}" autocomplete="username" hidden>
+<div class="field"><label for="cur1">Current password</label><input type="password" id="cur1" name="current" autocomplete="current-password" required></div>
+<div class="field"><label for="new1">New password</label><input type="password" id="new1" name="password" autocomplete="new-password" minlength="{{ min_len }}" required></div>
+<div class="field"><label for="new2">Repeat the new password</label><input type="password" id="new2" name="confirm" autocomplete="new-password" minlength="{{ min_len }}" required></div>
+<div class="field"><button class="btn" type="submit">Change password</button></div></form></section>
+
+<section class="panel reveal"><h2>Recovery code</h2>
+<p class="muted">{% if admin.recovery_hash %}A recovery code is set. It resets a forgotten password at <code>/admin/forgot</code>. Creating a new one replaces it.{% else %}<strong>No recovery code yet.</strong> Without one, a forgotten password can only be reset from the command line.{% endif %}</p>
+<form method="post" action="{{ url_for('main.account_recovery') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="text" name="username" value="{{ admin.username }}" autocomplete="username" hidden>
+<div class="field"><label for="cur2">Current password</label><input type="password" id="cur2" name="current" autocomplete="current-password" required></div>
+<div class="field"><button class="btn" type="submit">{{ 'Create a new recovery code' if admin.recovery_hash else 'Create a recovery code' }}</button></div></form></section>
+</div>
+
+<section class="panel reveal"><h2>API keys</h2>
+<p class="muted">A key lets the command line or a script read this portal (read-only). Each key belongs to you, is shown once, and can be revoked. Use it with <code>ORS_SRS_API_KEY=&lt;key&gt; python app.py cli clients</code>. Do not use the secret key for this.</p>
+{% if keys %}<div class="tablewrap"><table><thead><tr><th>Label</th><th>Starts with</th><th>Created</th><th>Last used</th><th>Status</th><th></th></tr></thead><tbody>
+{% for k in keys %}<tr><td>{{ k.label }}</td><td><code>{{ k.prefix }}…</code></td><td>{{ k.created_at|local }}</td><td>{{ k.last_used_at|local }}</td>
+<td>{% if k.revoked_at %}<span class="chip revoked">Revoked</span>{% else %}<span class="chip completed">Active</span>{% endif %}</td>
+<td>{% if not k.revoked_at %}<form class="inline" method="post" action="{{ url_for('main.account_key_revoke', key_id=k.id) }}" data-confirm="Revoke this key? Anything using it stops working."><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn danger" type="submit">Revoke</button></form>{% endif %}</td></tr>{% endfor %}
+</tbody></table></div>{% endif %}
+<form method="post" action="{{ url_for('main.account_key_create') }}" class="two"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="text" name="username" value="{{ admin.username }}" autocomplete="username" hidden>
+<div class="field"><label for="klabel">Label for the new key</label><input type="text" id="klabel" name="label" maxlength="60" autocomplete="off" placeholder="for example: laptop" required></div>
+<div class="field"><label for="cur3">Current password</label><input type="password" id="cur3" name="current" autocomplete="current-password" required></div>
+<div class="field"><button class="btn" type="submit">Create API key</button></div></form></section>
+{% endblock %}

@@ -6,6 +6,7 @@ Run `python app.py setup` once to store the login in a git-ignored .env; `hash-p
 """
 import hashlib
 import io
+import json
 import os
 import re
 import secrets
@@ -19,7 +20,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pyexcel
-from flask import (Blueprint, Flask, abort, current_app, flash, jsonify, redirect,
+from flask import (Blueprint, Flask, abort, current_app, flash, g, jsonify, redirect,
                    render_template, request, send_file, session, url_for)
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
@@ -29,7 +30,7 @@ from openpyxl import load_workbook
 from sqlalchemy import case, event, exists, func, inspect, or_, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import aliased
+from sqlalchemy.orm import aliased, selectinload
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -129,6 +130,36 @@ class Assessment(db.Model):
     @property
     def ordered_scores(self):
         return [(item, self.scores[item]) for item in scoring.ITEMS[self.type]]
+
+
+class Admin(db.Model):
+    """A portal administrator. The password and the recovery code are stored only as hashes."""
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(64), unique=True, nullable=False)
+    password_hash = db.Column(db.String(256), nullable=False)
+    recovery_hash = db.Column(db.String(64))  # SHA-256 of the recovery code; None until one is created
+    created_at = db.Column(db.DateTime, nullable=False, default=utcnow)
+    last_login_at = db.Column(db.DateTime)
+    api_keys = db.relationship('ApiKey', back_populates='admin', cascade='all, delete-orphan', order_by='ApiKey.id')
+
+    @property
+    def stamp(self):
+        """Changes whenever the password does, so a password change signs every other browser out. Cookies carry
+        it too, which means SECRET_KEY alone cannot forge a session: the forger would also need this database row."""
+        return hash_token(self.password_hash)[:16]
+
+
+class ApiKey(db.Model):
+    """Per-administrator key for the command line and scripts. Only the SHA-256 is stored; the key is shown once."""
+    id = db.Column(db.Integer, primary_key=True)
+    admin_id = db.Column(db.Integer, db.ForeignKey('admin.id'), nullable=False, index=True)
+    label = db.Column(db.String(60), nullable=False)
+    prefix = db.Column(db.String(12), nullable=False)  # first characters of the key, to tell keys apart in a list
+    key_hash = db.Column(db.String(64), unique=True, nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False, default=utcnow)
+    last_used_at = db.Column(db.DateTime)
+    revoked_at = db.Column(db.DateTime)
+    admin = db.relationship('Admin', back_populates='api_keys')
 
 
 # ---------------------------------------------------------------- helpers
@@ -343,11 +374,149 @@ def build_workbook(client):
     return buf
 
 
+# ---------------------------------------------------------------- administrators: accounts, sessions, keys
+
+MIN_PASSWORD_LEN = 10
+USERNAME_RE = re.compile(r'^[a-z0-9][a-z0-9._-]{1,63}$')
+# scrypt:N:r:p$salt$hex or pbkdf2:sha256[:iterations]$salt$hex. A shell that expands the `$` signs leaves something that fails this.
+HASH_RE = re.compile(r'^(scrypt:\d+:\d+:\d+|pbkdf2:[a-z0-9]+(:\d+)?)\$[^$\s]+\$[0-9a-f]+$')
+# Checked when the ID is unknown, so a wrong ID and a wrong password take equally long.
+DUMMY_HASH = generate_password_hash(secrets.token_hex(8))
+
+
+def norm_username(value):
+    return str(value).strip().lower()
+
+
+def password_problem(password, confirm=None):
+    if len(password) < MIN_PASSWORD_LEN:
+        return f'Use at least {MIN_PASSWORD_LEN} characters.'
+    if len(password) > 128:
+        return 'Use 128 characters or fewer.'
+    if confirm is not None and password != confirm:
+        return 'The two passwords differ.'
+    return ''
+
+
+def new_recovery_code():
+    raw = secrets.token_hex(12)  # 96 bits, so the 5-per-minute limit makes guessing hopeless
+    return '-'.join(raw[i:i + 4] for i in range(0, 24, 4))
+
+
+def recovery_hash(code):
+    return hash_token(re.sub(r'[^0-9a-f]', '', str(code).lower()))  # spaces, dashes and case do not matter
+
+
+def issue_recovery_code(admin):
+    """Replace the admin's recovery code. Returns the new code, which is never stored in readable form."""
+    code = new_recovery_code()
+    admin.recovery_hash = recovery_hash(code)
+    return code
+
+
+def revoke_api_keys(admin):
+    now = utcnow()
+    for key in admin.api_keys:
+        key.revoked_at = key.revoked_at or now
+
+
+def new_api_key(admin, label):
+    key = 'ors_' + secrets.token_urlsafe(32)
+    db.session.add(ApiKey(admin_id=admin.id, label=label, prefix=key[:12], key_hash=hash_token(key)))
+    return key
+
+
+def create_admin(username, password):
+    """Add an administrator and return (admin, recovery_code). Raises ValueError with a message fit to show."""
+    username = norm_username(username)
+    if not USERNAME_RE.match(username):
+        raise ValueError('The ID must be 2 to 64 characters: lower-case letters, digits, dot, dash or underscore.')
+    if password_problem(password):
+        raise ValueError(password_problem(password))
+    if Admin.query.filter_by(username=username).first():
+        raise ValueError(f'The ID "{username}" already exists.')
+    admin = Admin(username=username, password_hash=generate_password_hash(password))
+    code = issue_recovery_code(admin)
+    db.session.add(admin)
+    db.session.commit()
+    return admin, code
+
+
+def reset_password(admin, password):
+    """Forgotten-password reset (recovery code or command line): new password, every browser signed out,
+    API keys revoked, fresh recovery code returned. Treats the old credentials as possibly exposed."""
+    if password_problem(password):
+        raise ValueError(password_problem(password))
+    admin.password_hash = generate_password_hash(password)
+    revoke_api_keys(admin)
+    code = issue_recovery_code(admin)
+    db.session.commit()
+    return code
+
+
+def authenticate(username, password):
+    admin = Admin.query.filter_by(username=norm_username(username)).first()
+    ok = check_password_hash(admin.password_hash if admin else DUMMY_HASH, password)
+    return admin if admin and ok else None
+
+
+def seed_admin(require=True):
+    """First start only: create the first administrator from ORS_SRS_ADMIN_USERNAME and ORS_SRS_ADMIN_PASSWORD_HASH
+    while the admin table is empty. After that the database is the source of truth and those variables are ignored."""
+    if Admin.query.first():
+        return
+    cfg = current_app.config
+    given = cfg['ADMIN_PASSWORD_HASH'] or ''
+    if HASH_RE.match(given):
+        username = norm_username(cfg['ADMIN_USERNAME'])
+        if not USERNAME_RE.match(username):
+            raise RuntimeError('ORS_SRS_ADMIN_USERNAME must be 2 to 64 characters: letters, digits, dot, dash or underscore.')
+        db.session.add(Admin(username=username, password_hash=given))
+        try:
+            db.session.commit()
+        except IntegrityError:  # another worker seeded at the same moment
+            db.session.rollback()
+    elif require:
+        raise RuntimeError('No administrator exists yet, and ORS_SRS_ADMIN_PASSWORD_HASH is missing or not a valid password hash '
+                           '(a shell that expands the $ signs corrupts it: use single quotes). '
+                           'Run `python app.py setup`, or `python app.py hash-password` and paste the result into the host settings.')
+
+
+def current_admin():
+    """The signed-in administrator, or None. The cookie must carry this admin's current stamp."""
+    admin = db.session.get(Admin, session['aid']) if session.get('aid') else None
+    return admin if admin and secrets.compare_digest(str(session.get('stamp', '')), admin.stamp) else None
+
+
 def admin_required(view):
     @wraps(view)
     def wrapper(*args, **kwargs):
-        if not session.get('admin'):
+        g.admin = current_admin()
+        if not g.admin:
+            session.clear()
             return redirect(url_for('main.admin_login'))
+        return view(*args, **kwargs)
+    return wrapper
+
+
+def api_required(view):
+    """Bearer-key authentication for /api/v1. Deliberately ignores the session cookie, so these CSRF-free
+    endpoints can never be driven by a browser that happens to be signed in."""
+    @wraps(view)
+    def wrapper(*args, **kwargs):
+        header = request.headers.get('Authorization', '')
+        token = header[7:].strip() if header[:7].lower() == 'bearer ' else ''
+        key = ApiKey.query.filter_by(key_hash=hash_token(token)).first() if token else None
+        if not key or key.revoked_at:
+            resp = jsonify(error='Missing or invalid API key. Send the header "Authorization: Bearer <key>".')
+            resp.status_code = 401
+            resp.headers['WWW-Authenticate'] = 'Bearer'
+            return resp
+        g.admin, g.api_key = key.admin, key
+        now = utcnow()
+        if not key.last_used_at or now - key.last_used_at > timedelta(minutes=1):  # at most one write a minute
+            key.last_used_at = now
+            db.session.commit()
         return view(*args, **kwargs)
     return wrapper
 
@@ -429,16 +598,38 @@ def save_assessment():
 @limiter.limit('5 per minute', methods=['POST'])
 def admin_login():
     if request.method == 'POST':
-        user_ok = secrets.compare_digest(request.form.get('username', '').encode(),
-                                         current_app.config['ADMIN_USERNAME'].encode())
-        pass_ok = check_password_hash(current_app.config['ADMIN_PASSWORD_HASH'], request.form.get('password', ''))
-        if user_ok and pass_ok:
+        admin = authenticate(request.form.get('username', ''), request.form.get('password', ''))
+        if admin:
             session.clear()
-            session['admin'] = True
+            session.update(aid=admin.id, stamp=admin.stamp)
             session.permanent = True
+            admin.last_login_at = utcnow()
+            db.session.commit()
+            if not admin.recovery_hash:
+                flash('You have no recovery code yet. Create one under Account so you can reset a forgotten password.')
             return redirect(url_for('main.dashboard'))
-        flash('Incorrect administrator ID or password.')
+        flash('Incorrect administrator ID or password.')  # one message for both, so IDs cannot be probed
     return render_template('login.html')
+
+
+@bp.route('/admin/forgot', methods=['GET', 'POST'])
+@limiter.limit('5 per minute', methods=['POST'])
+def admin_forgot():
+    """Forgotten password: the ID plus the recovery code made under Account. No email is involved, because the
+    portal sends nothing to third parties. A locked-out admin with no code uses `python app.py reset-password`."""
+    if request.method == 'POST':
+        form = request.form
+        admin = Admin.query.filter_by(username=norm_username(form.get('username', ''))).first()
+        stored = (admin.recovery_hash if admin else None) or '0' * 64
+        code_ok = secrets.compare_digest(recovery_hash(form.get('code', '')), stored) and bool(admin and admin.recovery_hash)
+        problem = password_problem(form.get('password', ''), form.get('confirm', ''))
+        if not code_ok:
+            flash('That ID and recovery code do not match.')
+        elif problem:
+            flash(problem)
+        else:
+            return render_template('recovery_done.html', code=reset_password(admin, form['password']))
+    return render_template('forgot.html')
 
 
 @bp.post('/admin/logout')
@@ -447,7 +638,83 @@ def admin_logout():
     return redirect(url_for('main.admin_login'))
 
 
+def confirmed_by_password():
+    """Account changes re-ask for the current password, so a borrowed browser session cannot take over the account."""
+    if check_password_hash(g.admin.password_hash, request.form.get('current', '')):
+        return True
+    flash('Your current password was not correct. Nothing was changed.')
+    return False
+
+
+@bp.get('/admin/account')
+@admin_required
+def account():
+    return render_template('account.html', admin=g.admin, keys=g.admin.api_keys)
+
+
+@bp.post('/admin/account/password')
+@admin_required
+@limiter.limit('5 per minute')
+def account_password():
+    new = request.form.get('password', '')
+    if confirmed_by_password():
+        problem = password_problem(new, request.form.get('confirm', ''))
+        if problem:
+            flash(problem)
+        else:
+            g.admin.password_hash = generate_password_hash(new)
+            db.session.commit()
+            session['stamp'] = g.admin.stamp  # this browser stays signed in; every other one is signed out
+            flash('Password changed. Any other signed-in browser was signed out.')
+    return redirect(url_for('main.account'))
+
+
+@bp.post('/admin/account/recovery')
+@admin_required
+@limiter.limit('5 per minute')
+def account_recovery():
+    if confirmed_by_password():
+        code = issue_recovery_code(g.admin)
+        db.session.commit()
+        flash(code, 'recovery')
+    return redirect(url_for('main.account'))
+
+
+@bp.post('/admin/account/keys')
+@admin_required
+@limiter.limit('5 per minute')
+def account_key_create():
+    label = ' '.join(request.form.get('label', '').split())[:60]
+    if not label:
+        flash('Give the key a label, for example "laptop".')
+    elif sum(1 for k in g.admin.api_keys if not k.revoked_at) >= 10:
+        flash('You already have 10 active keys. Revoke one first.')
+    elif confirmed_by_password():
+        key = new_api_key(g.admin, label)
+        db.session.commit()
+        flash(key, 'apikey')
+    return redirect(url_for('main.account'))
+
+
+@bp.post('/admin/account/keys/<int:key_id>/revoke')
+@admin_required
+def account_key_revoke(key_id):
+    key = ApiKey.query.filter_by(id=key_id, admin_id=g.admin.id).first_or_404()
+    key.revoked_at = key.revoked_at or utcnow()
+    db.session.commit()
+    flash(f'API key "{key.label}" revoked.')
+    return redirect(url_for('main.account'))
+
+
 # ---------------------------------------------------------------- admin: clients list + recent
+
+def client_rows(clients):
+    """Each client with its list Status, from the newest link (one query for the whole page)."""
+    newest = {}
+    for link in Link.query.filter(Link.client_pk.in_([c.id for c in clients])).order_by(Link.id):
+        newest[link.client_pk] = link  # ascending ids: the last one written is the newest
+    return [{'client': c, 'state': link_state(newest.get(c.id))} for c in clients]
+
 
 @bp.get('/admin')
 @admin_required
@@ -455,10 +722,7 @@ def dashboard():
     f = read_filters(request.args)
     page = db.paginate(client_select(f).order_by(*SORTS[f['sort']][1]()),
                        page=request.args.get('page', 1, type=int), per_page=PER_PAGE, error_out=False)
-    newest = {}
-    for link in Link.query.filter(Link.client_pk.in_([c.id for c in page.items])).order_by(Link.id):
-        newest[link.client_pk] = link  # ascending ids: the last one written is the newest
-    rows = [{'client': c, 'state': link_state(newest.get(c.id))} for c in page.items]
+    rows = client_rows(page.items)
     chips = {}  # one removable chip per active filter, in the order they appear in the panel
     if f['q']:
         chips['q'] = f'Search: {f["q"]}'
@@ -480,14 +744,18 @@ def dashboard():
                            flag_options={c: info[3] for c, info in scoring.FLAG_INFO.items()})
 
 
+def recent_page():
+    kind = request.args.get('type') if request.args.get('type') in scoring.ITEMS else ''
+    q = Assessment.query.options(selectinload(Assessment.client)).order_by(Assessment.created_at.desc(), Assessment.id.desc())
+    if kind:
+        q = q.filter_by(type=kind)
+    return kind, q.paginate(page=request.args.get('page', 1, type=int), per_page=PER_PAGE, error_out=False)
+
+
 @bp.get('/admin/recent')
 @admin_required
 def recent():
-    kind = request.args.get('type') if request.args.get('type') in scoring.ITEMS else ''
-    q = Assessment.query.order_by(Assessment.created_at.desc(), Assessment.id.desc())
-    if kind:
-        q = q.filter_by(type=kind)
-    page = q.paginate(page=request.args.get('page', 1, type=int), per_page=PER_PAGE, error_out=False)
+    kind, page = recent_page()
     return render_template('recent.html', page=page, kind=kind)
 
 
@@ -587,7 +855,7 @@ def client_detail(slug):
 
 @bp.get('/admin/client/<slug>/activity.json')
 def client_activity(slug):
-    if not session.get('admin'):
+    if not current_admin():
         abort(401)
     return jsonify(state=activity_state(get_client(slug)))
 
@@ -683,6 +951,54 @@ def export_all():
     return send_file(mem, as_attachment=True, download_name='PCOMS_all_client_reports.zip', mimetype='application/zip')
 
 
+# ---------------------------------------------------------------- read-only JSON API (per-administrator key)
+
+def api_get(path):
+    def decorate(view):
+        return bp.get('/api/v1' + path)(limiter.limit('120 per minute')(api_required(view)))
+    return decorate
+
+
+@api_get('/me')
+def api_me():
+    return jsonify(username=g.admin.username, key={'label': g.api_key.label, 'prefix': g.api_key.prefix})
+
+
+@api_get('/clients')
+def api_clients():
+    f = read_filters(request.args)
+    page = db.paginate(client_select(f).order_by(*SORTS[f['sort']][1]()),
+                       page=request.args.get('page', 1, type=int), per_page=PER_PAGE, error_out=False)
+    return jsonify(total=page.total, page=page.page, pages=page.pages, clients=[{
+        'id': c.slug, 'name': f'{c.first_name} {c.last_name}', 'age_band': c.age_band, 'status': state,
+        'sessions': c.session_count, 'last_session': c.last_session_on and c.last_session_on.isoformat(),
+        'ors_latest': c.ors_latest, 'srs_latest': c.srs_latest, 'needs_attention': c.needs_attention,
+        'flags': [code for code in c.flag_codes.strip(',').split(',') if code]} for c, state in
+        ((r['client'], r['state']) for r in client_rows(page.items))])
+
+
+@api_get('/clients/<slug>')
+def api_client(slug):
+    client = get_client(slug)
+    sessions = sessions_of(client.assessments)
+
+    def part(a):
+        return {'total': a.total, 'scores': dict(a.ordered_scores)} if a else None
+    return jsonify(id=client.slug, name=f'{client.first_name} {client.last_name}', age_band=client.age_band,
+                   needs_attention=client.needs_attention,
+                   flags=[{'code': x['code'], 'level': x['level'], 'text': x['text']} for x in flags_for(client, sessions)],
+                   sessions=[{'no': x['no'], 'date': x['date'].isoformat(), 'ors': part(x['ORS']), 'srs': part(x['SRS'])}
+                             for x in sessions])
+
+
+@api_get('/recent')
+def api_recent():
+    kind, page = recent_page()
+    return jsonify(total=page.total, page=page.page, pages=page.pages, type=kind or None, assessments=[{
+        'id': a.id, 'client': a.client.slug, 'type': a.type, 'session': a.session_no, 'date': a.taken_on.isoformat(),
+        'total': a.total} for a in page.items])
+
+
 @bp.after_app_request
 def security_headers(resp):
     h = resp.headers
@@ -704,8 +1020,9 @@ def security_headers(resp):
 ENV_FILE = BASE / '.env'
 
 
-def read_env(path=ENV_FILE):
+def read_env(path=None):
     """KEY=VALUE lines of a .env file as a dict. Blank lines and # comments are skipped; one pair of quotes is stripped."""
+    path = path or ENV_FILE
     out = {}
     for line in path.read_text().splitlines() if path.exists() else []:
         if '=' in line and not line.lstrip().startswith('#'):
@@ -714,15 +1031,17 @@ def read_env(path=ENV_FILE):
     return out
 
 
-def load_env(path=ENV_FILE):
+def load_env(path=None):
     """Copy .env into the process environment. A variable already set (Render, your shell) wins over the file."""
     for key, value in read_env(path).items():
         os.environ.setdefault(key, value)
 
 
-def write_env(updates, path=ENV_FILE):
-    """Set keys in a .env file and keep every other line. Values are single-quoted so a shell reads the `$` in a hash literally."""
-    lines = path.read_text().splitlines() if path.exists() else []
+def write_env(updates, path=None, remove=()):
+    """Set keys in a .env file, drop the `remove` keys, keep every other line. Values are single-quoted so a shell
+    that sources the file reads any `$` literally."""
+    path = path or ENV_FILE
+    lines = [ln for ln in (path.read_text().splitlines() if path.exists() else []) if ln.split('=', 1)[0].strip() not in remove]
     for key, value in updates.items():
         new = f"{key}='{value}'"
         at = next((i for i, line in enumerate(lines) if line.split('=', 1)[0].strip() == key), None)
@@ -735,21 +1054,19 @@ def write_env(updates, path=ENV_FILE):
         f.write('\n'.join(lines) + '\n')
 
 
-def setup_env(password, username='admin', path=ENV_FILE):
-    """Local one-time setup: store the password HASH (never the password) and a session secret in .env.
-    An existing secret is kept so rerunning only changes the login."""
+def setup_env(path=None):
+    """Local settings file: a session secret (kept if present) and ORS_SRS_ENV=dev, which lets http://localhost login work.
+    Logins live in the database, not here."""
     old = read_env(path)
-    write_env({'ORS_SRS_ADMIN_USERNAME': username,
-               'ORS_SRS_ADMIN_PASSWORD_HASH': generate_password_hash(password),
-               'ORS_SRS_SECRET_KEY': old.get('ORS_SRS_SECRET_KEY') or secrets.token_hex(32),
-               'ORS_SRS_ENV': old.get('ORS_SRS_ENV', 'dev')}, path)  # dev = Secure cookie off, so http://localhost login works
+    write_env({'ORS_SRS_SECRET_KEY': old.get('ORS_SRS_SECRET_KEY') or secrets.token_hex(32),
+               'ORS_SRS_ENV': old.get('ORS_SRS_ENV', 'dev')}, path)
 
 
 def ask_password():
     import getpass
-    password = getpass.getpass('New administrator password (8+ characters): ')
-    if len(password) < 8:
-        sys.exit('Too short. Nothing changed.')
+    password = getpass.getpass(f'New administrator password ({MIN_PASSWORD_LEN}+ characters): ')
+    if password_problem(password):
+        sys.exit(password_problem(password) + ' Nothing changed.')
     if password != getpass.getpass('Repeat it: '):
         sys.exit('The two entries differ. Nothing changed.')
     return password
@@ -786,17 +1103,16 @@ def create_app(config=None):
         # Flask-WTF would also demand a Referer on every HTTPS POST, but Referrer-Policy: no-referrer (which keeps link
         # tokens out of Referer) means browsers send none. The CSRF token itself is still checked on every POST.
         WTF_CSRF_SSL_STRICT=False,
+        REQUIRE_ADMIN=True,  # False only for the admin commands that may run before any administrator exists
     )
     if config:
         app.config.update(config)
     if len(app.config['SECRET_KEY'] or '') < 16:
         raise RuntimeError('ORS_SRS_SECRET_KEY must be set to a random string of at least 16 characters.')
-    if not re.match(r'^(scrypt|pbkdf2):', app.config['ADMIN_PASSWORD_HASH'] or ''):
-        raise RuntimeError('ORS_SRS_ADMIN_PASSWORD_HASH is missing or not a password hash. '
-                           'Run `python app.py hash-password` and see README.md.')
     hops = int(env('ORS_SRS_PROXY_HOPS', '0'))
     if hops:  # only trust X-Forwarded-* when actually behind that many proxies
         app.wsgi_app = ProxyFix(app.wsgi_app, x_for=hops, x_proto=hops, x_host=hops)
+    app.jinja_env.globals['min_len'] = MIN_PASSWORD_LEN
     db.init_app(app)
     csrf.init_app(app)
     limiter.init_app(app)
@@ -819,23 +1135,188 @@ def create_app(config=None):
         if missing:  # an older database: fail loudly here rather than with a confusing error on the first request
             raise RuntimeError(f'The database was created by an older version and lacks columns {missing}. Local dev: delete data/app.db. '
                                'Production: back up, then migrate (see DEPLOY.md, "Updating the app").')
+        seed_admin(app.config['REQUIRE_ADMIN'])
     return app
+
+
+# ---------------------------------------------------------------- command line
+
+USAGE = """Commands (python app.py <command>):
+  (none)                      start the app on http://127.0.0.1:5000
+  setup                       first-time local setup: .env settings and your administrator login
+  create-admin <id>           add another administrator
+  reset-password <id>         set a new password (also signs the admin out everywhere and revokes their API keys)
+  admins                      list administrators (no secrets are shown)
+  api-key <id> [label]        issue an API key for an administrator; shown once
+  cli me|clients|client <id>|recent   read a running portal with ORS_SRS_API_KEY (see README)
+  hash-password               print a password hash to paste into a host's settings (first start only)
+  rebuild-summaries           recompute the client list's summary columns"""
+
+
+def admin_app():
+    """App context for the admin commands. They never touch cookies, so a missing SECRET_KEY is no obstacle
+    (this lets you run them from your computer against the production DATABASE_URL alone)."""
+    return create_app({'REQUIRE_ADMIN': False, 'SECRET_KEY': os.environ.get('ORS_SRS_SECRET_KEY') or secrets.token_hex(32)}).app_context()
+
+
+def one_time(label, secret):
+    print(f'\n{label} (shown only once; store it somewhere safe):\n    {secret}\n')
+
+
+def command_setup():
+    username = norm_username(input('Administrator ID [admin]: ') or 'admin')
+    password = ask_password()
+    setup_env()
+    load_env()
+    os.environ.pop('ORS_SRS_ADMIN_PASSWORD_HASH', None)  # an old .env hash must not seed a second administrator
+    with admin_app():
+        admin = Admin.query.filter_by(username=username).first()
+        code = reset_password(admin, password) if admin else create_admin(username, password)[1]
+    write_env({}, remove=('ORS_SRS_ADMIN_USERNAME', 'ORS_SRS_ADMIN_PASSWORD_HASH'))  # superseded by the database
+    print(f'Saved administrator "{username}" in the database and settings in {ENV_FILE}.\n'
+          f'Sign in with exactly that ID (it is not "admin" unless you chose that).')
+    one_time('Recovery code (use it at /admin/forgot if you forget the password)', code)
+    print('Start the app with: python app.py')
+
+
+def command_create_admin(args):
+    if not args:
+        sys.exit('Usage: python app.py create-admin <id>')
+    with admin_app():
+        admin, code = create_admin(args[0], ask_password())
+        name = admin.username
+    print(f'Created administrator "{name}".')
+    one_time('Recovery code', code)
+
+
+def command_reset_password(args):
+    if not args:
+        sys.exit('Usage: python app.py reset-password <id>')
+    with admin_app():
+        admin = Admin.query.filter_by(username=norm_username(args[0])).first()
+        if not admin:
+            sys.exit(f'No administrator "{args[0]}". Run `python app.py admins` to see the IDs.')
+        name, code = admin.username, reset_password(admin, ask_password())
+    print(f'Password changed for "{name}". Their signed-in browsers and API keys were revoked.')
+    one_time('New recovery code', code)
+
+
+def command_admins():
+    with admin_app():
+        for a in Admin.query.order_by(Admin.id):
+            print(f'{a.username}  created {a.created_at:%Y-%m-%d}  last sign-in '
+                  f'{a.last_login_at.strftime("%Y-%m-%d %H:%M") if a.last_login_at else "never"} UTC  '
+                  f'recovery code {"set" if a.recovery_hash else "NOT set"}  '
+                  f'active API keys {sum(1 for k in a.api_keys if not k.revoked_at)}')
+        if not Admin.query.first():
+            print('No administrators yet. Run `python app.py setup`.')
+
+
+def command_api_key(args):
+    if not args:
+        sys.exit('Usage: python app.py api-key <id> [label]')
+    with admin_app():
+        admin = Admin.query.filter_by(username=norm_username(args[0])).first()
+        if not admin:
+            sys.exit(f'No administrator "{args[0]}".')
+        name, key = admin.username, new_api_key(admin, ' '.join(args[1:])[:60] or 'cli')
+        db.session.commit()
+    one_time(f'API key for "{name}"', key)
+    print('Use it with: export ORS_SRS_API_KEY=<the key>; python app.py cli clients')
+
+
+def print_table(headers, rows):
+    widths = [max(len(str(x)) for x in col) for col in zip(headers, *rows)]
+    for row in [headers, *rows]:
+        print('  '.join(str(x).ljust(w) for x, w in zip(row, widths)).rstrip())
+
+
+def command_cli(args):
+    """Read the portal from the terminal through its JSON API, using an API key (never the secret key)."""
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+    raw = '--json' in args
+    args = [a for a in args if a != '--json'] or ['me']
+    key = os.environ.get('ORS_SRS_API_KEY')
+    if not key:
+        sys.exit('Set ORS_SRS_API_KEY to your API key (Account page, or `python app.py api-key <id>`).')
+    base = os.environ.get('ORS_SRS_URL', 'http://127.0.0.1:5000').rstrip('/')
+    if not base.startswith(('http://', 'https://')):  # urlopen would also read file: and ftp: URLs
+        sys.exit('ORS_SRS_URL must start with http:// or https://')
+    what = args[0]
+    if what == 'client' and len(args) == 2:
+        path, params = '/clients/' + urllib.parse.quote(args[1], safe=''), []
+    elif what in ('me', 'clients', 'recent'):
+        path, params = '/' + what, [tuple(a.split('=', 1)) for a in args[1:] if '=' in a]
+    else:
+        sys.exit('Usage: python app.py cli me | clients [key=value ...] | client <id> | recent [key=value ...]  [--json]')
+    url = base + '/api/v1' + path + ('?' + urllib.parse.urlencode(params) if params else '')
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers={'Authorization': 'Bearer ' + key}), timeout=20) as r:  # nosec B310: scheme checked above
+            data = json.load(r)
+    except urllib.error.HTTPError as e:
+        try:
+            detail = json.load(e).get('error', e.reason)
+        except ValueError:
+            detail = e.reason
+        sys.exit(f'{e.code}: {detail}')
+    except urllib.error.URLError as e:
+        sys.exit(f'Cannot reach {base}: {e.reason}. Is the app running?')
+    if raw:
+        print(json.dumps(data, indent=2))
+        return
+    dash = lambda v: '-' if v is None else v
+    if what == 'me':
+        print(f'Signed in to {base} as "{data["username"]}" with key "{data["key"]["label"]}" ({data["key"]["prefix"]}...)')
+    elif what == 'clients':
+        print(f'{data["total"]} clients, page {data["page"]} of {data["pages"]}')
+        print_table(['ID', 'STATUS', 'SESSIONS', 'LAST', 'ORS', 'SRS', 'ATTENTION', 'FLAGS'],
+                    [[c['id'], c['status'], c['sessions'], dash(c['last_session']), dash(c['ors_latest']), dash(c['srs_latest']),
+                      'yes' if c['needs_attention'] else '', ','.join(c['flags'])] for c in data['clients']])
+    elif what == 'client':
+        print(f'{data["name"]} ({data["id"]}, {data["age_band"]}){"  NEEDS ATTENTION" if data["needs_attention"] else ""}')
+        for f in data['flags']:
+            print(f'  [{f["level"]}] {f["text"]}')
+        print_table(['SESSION', 'DATE', 'ORS', 'SRS'], [[x['no'], x['date'], dash(x['ors'] and x['ors']['total']),
+                                                         dash(x['srs'] and x['srs']['total'])] for x in data['sessions']])
+    else:
+        print(f'{data["total"]} assessments, page {data["page"]} of {data["pages"]}')
+        print_table(['ID', 'CLIENT', 'TYPE', 'SESSION', 'DATE', 'TOTAL'],
+                    [[a['id'], a['client'], a['type'], a['session'], a['date'], a['total']] for a in data['assessments']])
+
+
+def command_rebuild_summaries():  # repair the client list's summary columns after any manual data fix
+    with admin_app():
+        for c in Client.query:
+            refresh_summary(c)
+        db.session.commit()
+        print(f'Rebuilt {Client.query.count()} client summaries.')
 
 
 if __name__ == '__main__':
     load_env()  # only here, never in create_app: tests and Render must not pick up a developer's .env
-    if sys.argv[1:] == ['setup']:
-        username = input('Administrator ID [admin]: ').strip() or 'admin'
-        setup_env(ask_password(), username)
-        print(f'Saved the login hash and a secret key to {ENV_FILE}. Start the app with: python app.py')
-    elif sys.argv[1:] == ['hash-password']:  # for a host such as Render, where you paste the hash into its settings
-        print(generate_password_hash(ask_password()))
-    elif sys.argv[1:] == ['rebuild-summaries']:  # repair the client list's summary columns after any manual data fix
-        app = create_app()
-        with app.app_context():
-            for c in Client.query:
-                refresh_summary(c)
-            db.session.commit()
-            print(f'Rebuilt {Client.query.count()} client summaries.')
-    else:
-        create_app().run(host='127.0.0.1', port=5000, debug=False)
+    cmd, args = (sys.argv[1], sys.argv[2:]) if len(sys.argv) > 1 else ('', [])
+    try:
+        if cmd == '':
+            create_app().run(host='127.0.0.1', port=5000, debug=False)
+        elif cmd == 'setup':
+            command_setup()
+        elif cmd == 'create-admin':
+            command_create_admin(args)
+        elif cmd == 'reset-password':
+            command_reset_password(args)
+        elif cmd == 'admins':
+            command_admins()
+        elif cmd == 'api-key':
+            command_api_key(args)
+        elif cmd == 'cli':
+            command_cli(args)
+        elif cmd == 'hash-password':  # for a host such as Render, where you paste the hash into its settings
+            print(generate_password_hash(ask_password()))
+        elif cmd == 'rebuild-summaries':
+            command_rebuild_summaries()
+        else:
+            sys.exit(USAGE)
+    except ValueError as e:
+        sys.exit(str(e))

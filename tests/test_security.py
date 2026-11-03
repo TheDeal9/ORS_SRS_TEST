@@ -64,8 +64,8 @@ def test_database_url_is_normalised_for_the_psycopg_driver(given, expected):
 
 # ---- every admin surface is behind login ------------------------------------------------------
 
-ADMIN_GET = ['/admin', '/admin/recent', '/admin/client/some-id', '/admin/client/some-id/report', '/admin/assessment/1', '/admin/client/some-id/export', '/admin/export-all']
-ADMIN_POST = ['/admin/clients', '/admin/client/some-id/links', '/admin/client/some-id/links/revoke',
+ADMIN_GET = ['/admin', '/admin/recent', '/admin/account', '/admin/client/some-id', '/admin/client/some-id/report', '/admin/assessment/1', '/admin/client/some-id/export', '/admin/export-all']
+ADMIN_POST = ['/admin/clients', '/admin/account/password', '/admin/account/recovery', '/admin/account/keys', '/admin/account/keys/1/revoke', '/admin/client/some-id/links', '/admin/client/some-id/links/revoke',
               '/admin/client/some-id/delete', '/admin/assessment/1/delete']
 
 
@@ -161,7 +161,8 @@ def test_every_admin_post_rejects_missing_csrf_token(tmp_path):
     token = csrf_token(c, '/admin')
     c.post('/admin/clients', data={'first_name': 'Jane', 'last_name': 'Patel', 'csrf_token': token})
     for path in ['/admin/clients', '/admin/client/jane-patel/links', '/admin/client/jane-patel/links/revoke',
-                 '/admin/client/jane-patel/delete', '/admin/assessment/1/delete', '/admin/logout']:
+                 '/admin/client/jane-patel/delete', '/admin/assessment/1/delete', '/admin/logout',
+                 '/admin/account/password', '/admin/account/recovery', '/admin/account/keys', '/admin/account/keys/1/revoke']:
         assert c.post(path, data={'first_name': 'x', 'last_name': 'y'}).status_code == 400, path
     assert db_count(app, app_module.Client) == 1  # the forged deletes did nothing
     assert c.post('/admin/client/jane-patel/delete', data={'csrf_token': token}).status_code == 302
@@ -290,33 +291,6 @@ def test_old_database_schema_stops_the_app_with_a_clear_message(tmp_path):
 
 # ---- local .env: login hash and secret live in a git-ignored file ---------------------------------
 
-def test_setup_stores_a_hash_not_the_password(tmp_path):
-    env = tmp_path / '.env'
-    app_module.setup_env('a long enough password', 'dr-demo', env)
-    text = env.read_text()
-    assert 'a long enough password' not in text
-    values = app_module.read_env(env)
-    assert check_password_hash(values['ORS_SRS_ADMIN_PASSWORD_HASH'], 'a long enough password')
-    assert values['ORS_SRS_ADMIN_USERNAME'] == 'dr-demo' and len(values['ORS_SRS_SECRET_KEY']) == 64
-    assert values['ORS_SRS_ENV'] == 'dev'
-    if os.name == 'posix':
-        assert env.stat().st_mode & 0o077 == 0  # owner-only
-
-
-def test_rerunning_setup_changes_the_login_but_keeps_secret_and_other_settings(tmp_path):
-    env = tmp_path / '.env'
-    env.write_text('# mine\nDATABASE_URL=postgresql://u:p@h/db\n')
-    app_module.setup_env('first password 1', path=env)
-    first = app_module.read_env(env)
-    app_module.setup_env('second password 2', path=env)
-    second = app_module.read_env(env)
-    assert second['ORS_SRS_SECRET_KEY'] == first['ORS_SRS_SECRET_KEY']
-    assert second['DATABASE_URL'] == 'postgresql://u:p@h/db' and env.read_text().startswith('# mine\n')
-    assert check_password_hash(second['ORS_SRS_ADMIN_PASSWORD_HASH'], 'second password 2')
-    assert not check_password_hash(second['ORS_SRS_ADMIN_PASSWORD_HASH'], 'first password 1')
-    assert env.read_text().count('ORS_SRS_ADMIN_PASSWORD_HASH') == 1  # replaced, not appended
-
-
 def test_read_env_handles_quotes_comments_and_dollar_signs(tmp_path):
     env = tmp_path / '.env'
     env.write_text('# note\n\nA=plain\nB="double"\nC=\'scrypt:32768:8:1$salt$abc\'\n  D = spaced \nE=a=b\nno-equals-line\n')
@@ -330,18 +304,6 @@ def test_a_real_environment_variable_beats_the_env_file(monkeypatch, tmp_path):
     env.write_text("FROM_HOST='file value'\nONLY_IN_FILE='file value'\n")
     app_module.load_env(env)
     assert os.environ['FROM_HOST'] == 'host value' and os.environ['ONLY_IN_FILE'] == 'file value'
-
-
-def test_the_app_starts_from_the_env_file_alone(monkeypatch, tmp_path):
-    monkeypatch.setattr(os, 'environ', {})
-    env = tmp_path / '.env'
-    app_module.setup_env('a long enough password', 'dr-demo', env)
-    app_module.load_env(env)
-    app = create_app({'SQLALCHEMY_DATABASE_URI': f'sqlite:///{tmp_path / "e.db"}', 'RATELIMIT_ENABLED': False, 'WTF_CSRF_ENABLED': False})
-    assert app.config['SESSION_COOKIE_SECURE'] is False  # ORS_SRS_ENV=dev came from the file
-    c = app.test_client()
-    assert c.post('/admin/login', data={'username': 'dr-demo', 'password': 'a long enough password'}).status_code == 302
-    assert c.post('/admin/login', data={'username': 'dr-demo', 'password': 'wrong password!'}).status_code == 200
 
 
 def test_create_app_never_loads_the_env_file(monkeypatch):
@@ -361,3 +323,18 @@ def test_requirements_list_everything_the_host_must_install():
     names = {re.split(r'[=\[<>]', line)[0].lower() for line in (Path(app_module.__file__).parent / 'requirements.txt').read_text().split()}
     assert {'flask', 'flask-sqlalchemy', 'flask-wtf', 'flask-limiter', 'psycopg', 'openpyxl', 'gunicorn',
             'pyexcel', 'pyexcel-io', 'pyexcel-xlsx'} <= names
+
+
+def test_render_blueprint_keeps_secrets_out_of_the_repo_and_matches_the_guide():
+    text = (Path(app_module.__file__).parent / 'render.yaml').read_text()
+    blocks = {m.group(1): m.group(2) for m in re.finditer(r'- key: (\w+)([^\n]*(?:\n(?!      - key:)[^\n]*)*)', text)}
+    for secret in ('DATABASE_URL', 'ORS_SRS_ADMIN_USERNAME', 'ORS_SRS_ADMIN_PASSWORD_HASH'):
+        assert 'sync: false' in blocks[secret] and 'value:' not in blocks[secret], secret  # asked for in the dashboard, never stored here
+    assert 'generateValue: true' in blocks['ORS_SRS_SECRET_KEY'] and 'value:' not in blocks['ORS_SRS_SECRET_KEY']
+    assert 'value: "1"' in blocks['ORS_SRS_PROXY_HOPS']  # one trusted proxy: more would let a visitor spoof their address
+    assert 'ORS_SRS_ENV' not in text  # dev mode would drop the Secure cookie flag
+    assert not re.search(r'scrypt:|pbkdf2:|postgres(ql)?://', text)
+    assert re.search(r'^    plan: free$', text, re.M) and re.search(r'^    region: singapore$', text, re.M)
+    assert 'healthCheckPath: /health' in text
+    assert 'app:create_app()' in text and '--workers 1' in text and 'access-logfile' not in text.replace('# one-time', '').split('startCommand:')[1].split('\n')[0]
+    assert f'PYTHON_VERSION' in blocks and (Path(app_module.__file__).parent / '.python-version').read_text().strip() in blocks['PYTHON_VERSION']

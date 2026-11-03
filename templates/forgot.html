@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>Reset password</title>
+<script src="{{ url_for('static', filename='theme.js') }}"></script><link rel="icon" href="data:,"><link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}"></head>
+<body class="center"><button class="icon-btn theme-corner" type="button" data-theme-toggle aria-pressed="false">Dark mode</button>
+<form class="card-page reveal" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><h1>Reset your password</h1><p>Enter your administrator ID and the recovery code you saved under Account. Nothing is emailed: this portal sends no data to anyone.</p>
+{% with messages = get_flashed_messages() %}{% if messages %}<p class="warn-box">{{ messages[0] }}</p>{% endif %}{% endwith %}
+<label for="username">Administrator ID</label><input type="text" id="username" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus>
+<label for="code">Recovery code</label><input type="text" id="code" name="code" autocomplete="off" autocapitalize="none" spellcheck="false" required>
+<label for="password">New password ({{ min_len }}+ characters)</label><input type="password" id="password" name="password" autocomplete="new-password" minlength="{{ min_len }}" required>
+<label for="confirm">Repeat the new password</label><input type="password" id="confirm" name="confirm" autocomplete="new-password" minlength="{{ min_len }}" required>
+<button class="btn" type="submit">Reset password</button>
+<p class="hint">Resetting signs you out everywhere, revokes your API keys and replaces the recovery code.</p>
+<p class="hint">No recovery code? On the computer that runs the app: <code>python app.py reset-password &lt;id&gt;</code></p>
+<p class="hint"><a href="{{ url_for('main.admin_login') }}">Back to sign in</a></p></form>
+<script src="{{ url_for('static', filename='vendor/motion.js') }}" defer></script><script src="{{ url_for('static', filename='admin.js') }}" defer></script></body></html>
