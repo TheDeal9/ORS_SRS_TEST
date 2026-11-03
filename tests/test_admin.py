@@ -7,11 +7,11 @@ from datetime import timedelta
 
 import pytest
 from openpyxl import load_workbook
-from sqlalchemy import event
+from sqlalchemy import UniqueConstraint, event
 from sqlalchemy.engine import Engine
 
 import app as app_module
-from app import Assessment, Client, Link, db, refresh_summary, utcnow
+from app import Admin, Assessment, Client, Link, db, refresh_summary, utcnow
 from conftest import (ORS_MARKS, SRS_MARKS, add_client, complete_session, db_count, new_link, submit)
 
 LOW_ORS = [0.1, 0.1, 0.1, 0.1]          # total 4: below cutoff
@@ -260,7 +260,8 @@ def test_empty_filter_result_offers_to_clear(admin):
 
 def test_clients_are_paginated_in_sql_and_paging_keeps_the_filters(app, admin):
     with app.app_context():
-        db.session.add_all(Client(slug=f'bulk-{i:02d}', first_name='Bulk', last_name=f'{i:02d}') for i in range(45))
+        owner = Admin.query.one().id
+        db.session.add_all(Client(admin_id=owner, slug=f'bulk-{i:02d}', first_name='Bulk', last_name=f'{i:02d}') for i in range(45))
         db.session.commit()
     p1, p2, p3 = (get(admin, page=n, q='bulk', sort='name') for n in (1, 2, 3))
     assert [len(listed(p)) for p in (p1, p2, p3)] == [20, 20, 5]
@@ -282,11 +283,13 @@ def test_client_list_query_count_does_not_grow_with_the_number_of_clients(app, a
             event.remove(Engine, 'before_cursor_execute', spy)
         return len(seen)
     with app.app_context():
-        db.session.add_all(Client(slug=f'c-{i}', first_name='C', last_name=str(i), session_count=3, ors_latest=20.0) for i in range(5))
+        owner = Admin.query.one().id
+        db.session.add_all(Client(admin_id=owner, slug=f'c-{i}', first_name='C', last_name=str(i), session_count=3, ors_latest=20.0) for i in range(5))
         db.session.commit()
     few = queries_for_dashboard()
     with app.app_context():
-        db.session.add_all(Client(slug=f'd-{i}', first_name='D', last_name=str(i), session_count=3, ors_latest=20.0) for i in range(15))
+        owner = Admin.query.one().id
+        db.session.add_all(Client(admin_id=owner, slug=f'd-{i}', first_name='D', last_name=str(i), session_count=3, ors_latest=20.0) for i in range(15))
         db.session.commit()
     assert queries_for_dashboard() == few and few <= 8
 
@@ -294,7 +297,8 @@ def test_client_list_query_count_does_not_grow_with_the_number_of_clients(app, a
 # ---- database: slug, summary columns, indexes ----------------------------------------------------------------
 
 def test_slug_is_the_unique_indexed_lookup_key_and_summary_columns_are_indexed():
-    assert Client.__table__.c.slug.unique and not hasattr(Client, 'client_id')
+    uniques = {tuple(c.name for c in u.columns) for u in Client.__table__.constraints if isinstance(u, UniqueConstraint)}
+    assert ('admin_id', 'slug') in uniques and not hasattr(Client, 'client_id')  # unique per administrator, not globally
     indexed = {c.name for ix in Client.__table__.indexes for c in ix.columns}
     assert {'needs_attention', 'last_session_on', 'created_at'} <= indexed
     assessment_indexed = {c.name for ix in Assessment.__table__.indexes for c in ix.columns}

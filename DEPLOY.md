@@ -9,7 +9,7 @@ How the pieces fit: Render runs the code (no permanent disk on the free plan, so
 
 ```bash
 source .venv/bin/activate
-python -m pytest            # expect: 415 passed
+python -m pytest            # expect: 625 passed
 git status --short          # data/, .venv/ and .env must NOT be listed
 ```
 
@@ -50,13 +50,15 @@ Choose the administrator ID you want (for example `bhargav`). You do not need to
 ## 4. Create the service on Render (Blueprint)
 
 1. dashboard.render.com, **New**, **Blueprint**, connect the repository, branch `main`.
-2. Render reads `render.yaml` and shows one service, `ors-srs-portal`: Python, **Free**, **Singapore**. Everything below is already filled in. It asks for three values:
+2. Render reads `render.yaml` and shows one service, `ors-srs-portal`: Python, **Free**, **Singapore**. Everything below is already filled in. It asks for five values (the last two only if you want sign-up and emailed codes; see section 4c):
 
    | Render asks for | Enter |
    |---|---|
    | `DATABASE_URL` | the Neon direct string from step 2 |
    | `ORS_SRS_ADMIN_USERNAME` | your administrator ID, for example `bhargav` |
    | `ORS_SRS_ADMIN_PASSWORD_HASH` | the whole `scrypt:...` line from step 3, pasted in the dashboard (it does not expand `$`) |
+   | `ORS_SRS_MAIL_FROM` | the sender address you verified in Brevo, for example `ORS SRS Portal <you@example.com>` |
+   | `ORS_SRS_BREVO_API_KEY` | the Brevo API key from section 4c |
 
 3. Click **Apply**. The first build takes a few minutes. Your address is `https://ors-srs-portal.onrender.com` (or similar; shown on the service page).
 
@@ -68,6 +70,7 @@ Already set for you by `render.yaml` (check them on the Environment tab):
 | `ORS_SRS_PROXY_HOPS` | `1` | trust exactly one proxy (Render's); without it links come out as `http://` and the login limit sees the wrong address |
 | `ORS_SRS_TIMEZONE` | `Asia/Kolkata` | dates follow your calendar day |
 | `PYTHON_VERSION` | `3.14.8` | the version the tests ran on |
+| `ORS_SRS_MAIL` | `brevo` | one-time codes are sent over HTTPS, because Render's free plan blocks the SMTP ports (25, 465, 587) |
 
 Do **not** set `ORS_SRS_ENV`: leaving it unset keeps the Secure cookie flag on. The start command deliberately has no `--access-logfile`, so the secret client links never appear in logs. Keep `--workers 1`: the login rate limiter keeps its counters in memory.
 
@@ -80,6 +83,18 @@ Do **not** set `ORS_SRS_ENV`: leaving it unset keeps the Secure cookie flag on. 
 3. **Account** → *Create a recovery code*; keep it somewhere other than this computer (password manager or paper).
 4. In Render, Environment tab: **delete `ORS_SRS_ADMIN_PASSWORD_HASH`** (and optionally the username). It was used once to create your account and is no longer needed; keeping it only leaves an old hash lying around.
 5. Optional: *Create API key*, then on your computer `export ORS_SRS_URL=https://<your-service>.onrender.com ORS_SRS_API_KEY=ors_...` and `python app.py cli clients`.
+
+## 4c. Email: one-time codes and sign-up (Brevo, free)
+
+The portal emails six-digit codes (sign-up confirmation and sign-in) and a few notices. It sends no links and no client data. Render's free web service cannot use SMTP, so the Blueprint uses Brevo's HTTPS API.
+
+1. Create a free account at brevo.com. Under **Senders, Domains & Dedicated IPs** add and **verify a sender address** you can receive mail at (a domain you own gives the best delivery; a single verified address works to start).
+2. **SMTP & API → API keys → Generate a new API key.** Copy it once.
+3. In Render's Environment tab set `ORS_SRS_MAIL_FROM` (that verified address, optionally as `Name <address>`) and `ORS_SRS_BREVO_API_KEY`. Leave `ORS_SRS_MAIL=brevo`.
+4. Redeploy, sign in, then **Account → Two-step sign-in**: add your email, type the code you receive. From then on every sign-in asks for a code.
+5. Sign-up is now open on the sign-in page. Every sign-up must confirm an email and then be approved by you (the owner) under **Admins**. To close it, set `ORS_SRS_SIGNUP=off`.
+
+Free-plan limits worth knowing: Brevo's free plan allows about 300 mails a day (each sign-in uses one), and a code that lands in spam can be requested again after a minute. If mail is switched off or fails, an administrator who already has an email **cannot sign in** (the portal never falls back to the password alone); the owner fixes the mail settings or, from their own computer, runs `DATABASE_URL='<Neon direct string>' python app.py reset-2fa <id>`.
 
 ## 5. First-run check (do this from your phone on mobile data)
 
@@ -113,7 +128,8 @@ Your part:
 Known limits on the free plans (accepted, not hidden):
 - Neon and Render free plans have no IP allow-list, so the database accepts connections from the internet, protected by TLS and its long random password. A paid Neon plan adds an allow-list.
 - Render appends to the `X-Forwarded-For` header and visitors can send their own, so the app trusts only the **last** entry (`ORS_SRS_PROXY_HOPS=1`). If that entry turns out to be Render's edge rather than the visitor, the five-tries limit is shared among visitors behind that edge: it still blocks guessing, it just may block you too for a minute.
-- There is no second factor on the portal's own sign-in (password plus the five-a-minute limit). TOTP is a possible later addition.
+- The emailed second step is only as strong as the mailbox that receives it (turn on two-step sign-in for that mailbox too). The authenticator app, which does not depend on email, is the stronger option; its emailed fallback is as strong as the mailbox. Administrators without a confirmed email still sign in with the password alone, so confirm yours.
+- The sign-in code limits (five tries per code, a lock after ten wrong codes) are counted in the database; the per-address request limits are in memory and assume one worker.
 - The portal is a clinical aid, not a certified medical system, and the data lives with US-based providers in Singapore. Check what applies to your practice (India's DPDP Act, your professional body). This is not legal advice.
 
 ## 8. Things that behave differently on the free plan
@@ -141,7 +157,7 @@ Also use **Download all reports (.zip)** on the Clients page for a spreadsheet c
 Why not Firebase (Firestore) or MongoDB Atlas instead:
 - **Firestore:** scheduled backups and point-in-time recovery need the paid Blaze plan (a billing account). The free quota (1 GiB, 20,000 writes a day) is fine, but there are no SQL unique constraints or joins, and the portal's session numbering, filtering, sorting and paging all depend on them.
 - **Atlas free (M0):** 0.5 GB, 100 operations a second; its backup add-on is a paid, optional feature (about $0.10 a day, capped near $3 a month, card required); it pauses after 30 days of inactivity; whether Mumbai is offered for free clusters I could not confirm.
-- Both would mean rewriting the data layer and re-proving the 415 tests, with a real risk to clinical records, for no free backup advantage. Neither moves the app itself into India, because Render has no India region.
+- Both would mean rewriting the data layer and re-proving the 625 tests, with a real risk to clinical records, for no free backup advantage. Neither moves the app itself into India, because Render has no India region.
 - If you later want managed backups, the cheapest route is Neon's paid plan (scheduled backups, 7-day history), a one-line change to `DATABASE_URL`.
 
 ## 10. Updating the app
@@ -150,7 +166,7 @@ Why not Firebase (Firestore) or MongoDB Atlas instead:
 python -m pytest && git add -A && git commit -m "describe the change" && git push
 ```
 
-Render rebuilds on every push to `main`. Changing the database schema (adding a column) is the one case that needs care: the app only creates missing tables and never alters existing ones. If you deploy code that expects a new column, the app refuses to start and the Render log says which columns are missing. Add a migration tool (Alembic) before the first schema change, and back up first.
+Render rebuilds on every push to `main`. **Upgrading from 0.1.0 to 0.1.1 changes the schema** (administrator ownership, sign-up and second-step fields) and there is no migration: a v0.1.0 database must be recreated, so the app refuses to start on one. If you have not entered real clients yet, create a fresh Neon branch or empty the database and let the app build the new tables. If you have, export first (**Download all reports**), do not push 0.1.1 until you have a plan, and ask for a migration script. Changing the database schema (adding a column) is the one case that needs care: the app only creates missing tables and never alters existing ones. If you deploy code that expects a new column, the app refuses to start and the Render log says which columns are missing. Add a migration tool (Alembic) before the first schema change, and back up first.
 
 Change your password under **Account**. Changing `ORS_SRS_ADMIN_PASSWORD_HASH` in Render later does nothing, because it is read only while the `admin` table is empty. Forgotten password: **Forgot your password?** with the recovery code, or from your own computer `DATABASE_URL='<Neon direct string>' python app.py reset-password <id>`. Changing `ORS_SRS_SECRET_KEY` signs everyone out.
 
@@ -166,6 +182,8 @@ Change your password under **Account**. Changing `ORS_SRS_ADMIN_PASSWORD_HASH` i
 | Links start with `http://` | `ORS_SRS_PROXY_HOPS` is not `1`. |
 | `OperationalError ... SSL` or `prepared statement already exists` | Use the **direct** Neon string (no `-pooler`) with `?sslmode=require`. |
 | `429 Too Many Requests` on sign-in | Five wrong attempts in a minute. Wait a minute. |
+| Sign-in says "Email codes are not available" or "could not email the code" | `ORS_SRS_MAIL` is unset or the provider rejected the send (Render log: `mail not sent (brevo: status 401)` or similar, never the code). Check `ORS_SRS_BREVO_API_KEY`, that `ORS_SRS_MAIL_FROM` is a verified sender, and Brevo's daily limit. Locked out entirely: `python app.py reset-2fa <id>` from your computer. |
+| Startup error "ORS_SRS_MAIL..." | A mail setting is incomplete (see the message). `smtp` needs host and sender; `brevo` needs key and sender; `console` is for `ORS_SRS_ENV=dev` only. |
 | First page after a quiet spell takes a minute | The free service was asleep (section 8). |
 
 ## 12. Before real clients

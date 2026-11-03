@@ -240,3 +240,19 @@ body.cp .footer { display: flex; justify-content: space-between; gap: 12px; alig
 dialog.drawer form > .btn { margin-top: 20px; width: 100%; }
 .card-page .hint { font-size: 13px; margin: 12px 0 0; }
 code { font: 12.5px ui-monospace, monospace; background: var(--soft); padding: 1px 5px; border-radius: 5px; }
+/* one-time code entry and the authenticator QR tile */
+.otp { font: 26px ui-monospace, monospace; letter-spacing: .35em; text-align: center; }
+.qr { display: inline-block; padding: 12px; background: #fff; border: 1px solid var(--line); border-radius: 12px; }  /* white in dark mode too: scanners need dark on light */
+.qr img { display: block; width: 200px; height: 200px; }
+.card-page .btn.light { margin-top: 12px; }
+/* caseload page: outcome bar and sample-size bars */
+.chart.bar { height: 56px; }
+.chart .seg { stroke: var(--surface); stroke-width: 2; }
+.chart .seg.csc { fill: var(--good); } .chart .seg.up { fill: var(--s1); } .chart .seg.flat { fill: var(--axis); } .chart .seg.down { fill: var(--bad); }
+.chart .seg:focus-visible, .chart .seg:hover { stroke: var(--focus); outline: none; }
+.chart .nbar { fill: var(--line); }
+.sq { display: inline-block; width: 11px; height: 11px; border-radius: 2px; vertical-align: -1px; margin-right: 6px; }
+.sq.csc { background: var(--good); } .sq.up { background: var(--s1); } .sq.flat { background: var(--axis); } .sq.down { background: var(--bad); }
+table.wrap-cells th, table.wrap-cells td { white-space: normal; }  /* many short columns: wrap rather than scroll sideways */
+td.actions-cell { min-width: 130px; }
+td.actions-cell form.inline { display: inline-block; margin: 2px 6px 2px 0; }

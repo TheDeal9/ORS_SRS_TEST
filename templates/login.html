@@ -8,5 +8,6 @@
 <p class="hint">The ID you chose at setup. It is only "admin" if you chose that.</p>
 <label for="password">Password</label><input type="password" id="password" name="password" autocomplete="current-password" required>
 <button class="btn" type="submit">Sign in securely</button>
-<p class="hint"><a href="{{ url_for('main.admin_forgot') }}">Forgot your password?</a></p></form>
+<p class="hint"><a href="{{ url_for('main.admin_forgot') }}">Forgot your password?</a></p>
+{% if signup %}<p class="hint">New here? <a href="{{ url_for('main.admin_signup') }}">Create an administrator account</a></p>{% endif %}</form>
 <script src="{{ url_for('static', filename='vendor/motion.js') }}" defer></script><script src="{{ url_for('static', filename='admin.js') }}" defer></script></body></html>

@@ -2,6 +2,7 @@
 import os
 import re
 
+import pyotp
 import pytest
 from werkzeug.security import generate_password_hash
 
@@ -23,6 +24,8 @@ def make_app(tmp_path, **overrides):
         RATELIMIT_ENABLED=False,
         SESSION_COOKIE_SECURE=False,
         TIMEZONE='UTC',
+        MAIL_BACKEND='memory',  # sent mail lands in app.config['MAIL_OUTBOX']
+        MAIL_FROM='ORS SRS Portal <portal@example.test>',
     )
     config.update(overrides)
     app = create_app(config)
@@ -85,6 +88,44 @@ def complete_session(admin, anon, client_id, ors=ORS_MARKS, srs=SRS_MARKS):
     assert submit(anon, token, 'ORS', ors).status_code == 200
     assert submit(anon, token, 'SRS', srs).status_code == 200
     return token
+
+
+def make_user(app, username, email=None, status='active', owner=False):
+    """Insert an administrator directly (fast hash). Returns the id."""
+    with app.app_context():
+        a = app_module.Admin(username=username, password_hash=PASSWORD_HASH, status=status, email=email, is_owner=owner)
+        db.session.add(a)
+        db.session.commit()
+        return a.id
+
+
+def login_as(app, username, password=PASSWORD):
+    """A test client that has done the password step only. Use finish_2fa() or expect a redirect to /admin/2fa."""
+    c = app.test_client()
+    return c, c.post('/admin/login', data={'username': username, 'password': password})
+
+
+def sign_in(app, username, **kw):
+    """Fully signed in, for an administrator with no second step."""
+    c, r = login_as(app, username, **kw)
+    assert r.status_code == 302 and r.headers['Location'].endswith('/admin'), r.get_data(as_text=True)[:300]
+    return c
+
+
+def outbox(app):
+    return app.config['MAIL_OUTBOX']
+
+
+def last_code(app, to):
+    """The six-digit code in the newest message to `to`."""
+    mails = [m for m in outbox(app) if m['to'] == to]
+    assert mails, f'no mail to {to}: {outbox(app)}'
+    return re.search(r'code: (\d{6})', mails[-1]['subject']).group(1)
+
+
+def totp_now(secret, offset=0):
+    import time
+    return pyotp.TOTP(secret).at(time.time() + 30 * offset)
 
 
 def db_count(app, model):

@@ -1,0 +1,43 @@
+{% extends 'base.html' %}
+{% block title %}Caseload · PCOMS{% endblock %}
+{% block content %}
+<div class="heading reveal"><div><h1>Caseload</h1>
+<div class="id">How your clients are doing overall, from their first and latest ORS. Only you can see this.</div></div></div>
+
+{% if empty %}<section class="panel reveal"><div class="empty">No ORS results yet. This page fills in as your clients complete assessments.</div></section>
+{% else %}
+<section class="panel reveal"><h2>At a glance</h2>
+<div class="cards">
+<div class="card"><h3>Clients with an ORS</h3><div class="big">{{ stats.with_ors }}</div><div class="muted">{{ stats.judged }} have two or more, so their change can be judged.</div></div>
+<div class="card"><h3>At or above the cutoff now</h3><div class="big">{{ pct(stats.above, stats.with_ors) }}%</div><div class="muted">{{ stats.above }} of {{ stats.with_ors }} on their latest ORS (25 adult, 28 ages 13 to 17).</div></div>
+<div class="card"><h3>Reliable improvement</h3><div class="big">{{ pct(stats.csc + stats.up, stats.judged) if stats.judged else '–' }}{{ '%' if stats.judged }}</div><div class="muted">{{ stats.csc + stats.up }} of {{ stats.judged }}: up {{ rc }} or more points from intake{% if stats.csc %}, {{ stats.csc }} also crossing the cutoff{% endif %}.</div></div>
+<div class="card"><h3>Reliable decline</h3><div class="big">{{ pct(stats.down, stats.judged) if stats.judged else '–' }}{{ '%' if stats.judged }}</div><div class="muted">{{ stats.down }} of {{ stats.judged }}: down {{ rc }} or more points from intake.</div></div>
+<div class="card"><h3>Average ORS change</h3><div class="big">{% if stats.judged %}<span class="{{ 'up' if stats.mean_change > 0 else 'down' if stats.mean_change < 0 }}">{{ '%+g'|format(stats.mean_change) }}</span>{% else %}–{% endif %}</div><div class="muted">Points from intake to latest, across {{ stats.judged }} client{{ 's' if stats.judged != 1 }}.</div></div>
+<div class="card"><h3>Effect size</h3><div class="big">{{ '%g'|format(stats.effect_size) if stats.effect_size is not none else '–' }}</div><div class="muted">{% if stats.effect_size is not none %}Average change divided by the spread of intake scores.{% else %}Shown from {{ min_n }} clients with two or more ORS ({{ stats.judged }} so far): fewer would mislead.{% endif %}</div></div>
+</div></section>
+
+<div class="two">
+<section class="panel reveal"><h2>Outcomes since intake</h2>
+{% if stats.judged %}{{ bar }}
+<div class="tablewrap"><table><thead><tr><th>Outcome</th><th>Clients</th><th>Share</th></tr></thead><tbody>
+{% for cls, label, glyph, n in parts %}<tr><td><span class="sq {{ cls }}"></span>{{ glyph }} {{ label }}</td><td class="num">{{ n }}</td><td class="num">{{ pct(n, stats.judged) }}%</td></tr>{% endfor %}
+</tbody></table></div>
+<p class="muted">Based on {{ stats.judged }} client{{ 's' if stats.judged != 1 }}. Clients with only one ORS are not judged yet.</p>
+{% else %}<div class="empty">Outcomes appear once a client has two ORS results.</div>{% endif %}</section>
+
+<section class="panel reveal"><h2>Average by session number</h2>
+{% if trend %}{{ trend }}
+<div class="legend"><span><span class="l1">●</span> Average ORS</span><span><span class="l2">■</span> Average SRS</span><span>Dashed line: SRS cutoff {{ srs_cutoff }}</span><span>Grey bars: clients behind each point</span></div>
+<p class="muted">Hover or focus a session for its averages and client counts. Later sessions rest on fewer clients, and people who stopped coming are no longer in them, so a rising line can partly reflect who stayed.</p>
+{% else %}<div class="empty">No results yet.</div>{% endif %}</section>
+</div>
+
+<section class="panel reveal noprint"><details class="how"><summary>How these numbers are worked out</summary><ul>
+<li>Each client counts once, using their first ORS (intake) and their latest ORS. Totals are out of 40.</li>
+<li><strong>Reliable change</strong> is a move of {{ rc }} points or more from intake; <strong>clinically significant</strong> adds crossing from below to above the client's cutoff. These are the same rules as the flags on each client page.</li>
+<li><strong>Effect size</strong> is the average change divided by the standard deviation of intake scores, for clients with two or more ORS. It is hidden below {{ min_n }} clients. Larger is better; use it to compare yourself over time, not to judge a single client.</li>
+<li>These are descriptions of your caseload, not predictions, and not a comparison with other practitioners. Averages by session number exclude clients who have stopped.</li>
+<li>The figures are calculated in the database from the saved scores, so they always match the client pages.</li>
+</ul></details></section>
+{% endif %}
+{% endblock %}

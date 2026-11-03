@@ -2,7 +2,7 @@
 
 A practitioner adds a client, sends a **one-time session link**, and the client marks the ORS and SRS lines. Scores are computed on the server and are only ever visible to the signed-in administrator, inside the portal: client list with filters, per-client history, trend charts with tooltips, reference flags, per-assessment detail and an in-portal report viewer. Excel is an optional download.
 
-Status: phases 0 to 3 are done (hardening, database, in-portal view, strict security policy). Deployment steps are in [DEPLOY.md](DEPLOY.md). Tests are explained in [TESTING.md](TESTING.md). Project context for contributors and AI agents: [AGENTS.md](AGENTS.md) and [CLAUDE.md](CLAUDE.md).
+Version 0.1.1 adds administrator **sign-up** (email-confirmed, owner-approved), **per-administrator data** (each admin sees only their own clients and reports), a **second sign-in step** (emailed code, optional authenticator app), real concurrent-write protection and a **Caseload** page. See [CHANGELOG.md](CHANGELOG.md). Phases 0 to 3 are done (hardening, database, in-portal view, strict security policy). Deployment steps are in [DEPLOY.md](DEPLOY.md). Tests are explained in [TESTING.md](TESTING.md). Project context for contributors and AI agents: [AGENTS.md](AGENTS.md) and [CLAUDE.md](CLAUDE.md).
 
 ## Run locally
 
@@ -17,7 +17,7 @@ python app.py setup                # asks for an administrator ID and password, 
 python app.py                      # http://127.0.0.1:5000/admin/login
 ```
 
-The app refuses to start without `ORS_SRS_SECRET_KEY` (16+ characters) and at least one administrator. There is no default password.
+The app refuses to start without `ORS_SRS_SECRET_KEY` (16+ characters) and at least one administrator. There is no default password. Each administrator sees only their own clients; the first administrator created is the **owner** and approves the others.
 
 ### How sign-in works
 
@@ -29,9 +29,29 @@ The app refuses to start without `ORS_SRS_SECRET_KEY` (16+ characters) and at le
 - On a host such as Render there is no `.env`: run `python app.py hash-password`, put the hash in `ORS_SRS_ADMIN_PASSWORD_HASH` (and the ID in `ORS_SRS_ADMIN_USERNAME`). They are used **once**, on the first start, to create the first administrator. After that the database is the source of truth and those two variables are ignored; change the password in the portal.
 - The first prototype's `ORS_SRS_ADMIN_PASSWORD` is no longer read by anything.
 
+### Signing up, approval and two-step sign-in (v0.1.1)
+
+- **Sign up:** when email is set up (see "Email" below) the sign-in page offers *Create an administrator account*: ID, email, password. A six-digit code is emailed to confirm the address, then the account waits for the **owner** to approve it on the **Admins** page (the owner is emailed, and so is the applicant when approved or rejected). Unconfirmed sign-ups are removed after a day.
+- **Your own clients only:** every client, assessment, report, export, API result and the Caseload page belong to one administrator. Another admin's pages are simply "not found". The owner can approve, disable and enable administrators, and sees how many clients each has, never who they are. Client IDs are unique per administrator.
+- **Second step:** once an administrator has a confirmed email, signing in asks for the password and then a six-digit code mailed to that address (valid 10 minutes, usable once, five wrong tries kill it, ten wrong codes lock the second step for 15 minutes). Under **Account** you can add or change the email (proved with a code) and optionally turn on an **authenticator app** (scan a QR code; the app's code then replaces the email step, and an emailed code stays available if you lose the phone). Administrators with no email yet (for example the first one created by `setup`) still sign in with the password alone and are reminded to add one.
+- **Locked out of the second step (lost phone and mailbox)?** On the computer that runs the app: `python app.py reset-2fa <id>` removes the email and authenticator app. The person then signs in with the password and sets them up again.
+
+### Email
+
+Codes and notices are plain text, with no links. Choose a backend with `ORS_SRS_MAIL`:
+
+| Value | Use |
+|---|---|
+| unset | No sign-up and no emailed codes. Administrators without an email are unaffected; one who already has an email cannot sign in while mail is off. |
+| `brevo` | Brevo's HTTPS API (free 300 mails a day). **Use this on Render's free plan, which blocks SMTP ports.** Needs `ORS_SRS_MAIL_FROM` (a sender you verified in Brevo) and `ORS_SRS_BREVO_API_KEY`. |
+| `smtp` | Any SMTP relay (local, or a paid host). `ORS_SRS_SMTP_HOST`, `_PORT` (587 or 465), `_USER`, `_PASSWORD`, `_SECURITY` (`starttls` default, `ssl`, `none` only without a password), plus `ORS_SRS_MAIL_FROM`. |
+| `console` | Local development only (`ORS_SRS_ENV=dev`): prints each message, code included, in the terminal. |
+
+`ORS_SRS_SIGNUP=off` closes sign-up without touching mail.
+
 ### Forgot your password
 
-1. **Recovery code (no email involved, nothing leaves the portal):** sign in once and open **Account** → *Create a recovery code*, and keep it safely. Later use **Forgot your password?** on the sign-in page: ID + code + new password. It signs everyone out, revokes your API keys and gives you a fresh code.
+1. **Recovery code (never emailed):** sign in once and open **Account** → *Create a recovery code*, and keep it safely. Later use **Forgot your password?** on the sign-in page: ID + code + new password. It signs everyone out, revokes your API keys and gives you a fresh code.
 2. **No code? From the computer that runs the app:** `python app.py reset-password <id>` (same effects). For the hosted app run it on your own computer against the production database: `DATABASE_URL='postgresql://...' python app.py reset-password <id>`.
 3. Change a known password under **Account** → *Change password*.
 
@@ -47,7 +67,7 @@ python app.py cli me | clients [attention=1 status=waiting q=jane page=2] | clie
 
 `ORS_SRS_SECRET_KEY` is not a login credential: it only signs cookies. Never use it as an API key.
 
-Other commands: `python app.py admins` (list administrators, no secrets), `create-admin <id>`, `reset-password <id>`, `api-key <id>`, `rebuild-summaries`, `hash-password`.
+Other commands: `python app.py admins` (list administrators: status, owner, second step, client count; no secrets), `create-admin <id>`, `reset-password <id>`, `reset-2fa <id>`, `api-key <id>`, `rebuild-summaries`, `hash-password`.
 
 **Windows:** `run_windows.bat` installs, runs `python app.py setup` the first time (when `.env` is missing), then starts the app (untested on Windows).
 
@@ -59,6 +79,10 @@ Other commands: `python app.py admins` (list administrators, no secrets), `creat
 | `ORS_SRS_ADMIN_PASSWORD_HASH` | first start only | Used once to create the first administrator when the `admin` table is empty. Locally `python app.py setup` does this for you; on a host paste the output of `python app.py hash-password`. |
 | `ORS_SRS_ADMIN_USERNAME` | first start only | ID of that first administrator. Default `admin`. |
 | `ORS_SRS_API_KEY`, `ORS_SRS_URL` | for `python app.py cli` | Your API key and the portal address. |
+| `ORS_SRS_MAIL`, `ORS_SRS_MAIL_FROM` | no | Email backend and sender for codes and notices; see "Email". |
+| `ORS_SRS_BREVO_API_KEY` | with `brevo` | Brevo API key (kept in the host's settings, never in the repo). |
+| `ORS_SRS_SMTP_HOST`, `_PORT`, `_USER`, `_PASSWORD`, `_SECURITY` | with `smtp` | SMTP relay settings. |
+| `ORS_SRS_SIGNUP` | no | `off` closes administrator sign-up. |
 | `DATABASE_URL` | no | Default: SQLite at `data/app.db`. `postgres://` and `postgresql://` URLs are accepted. |
 | `ORS_SRS_TIMEZONE` | no | Default `UTC`. Set your own (for example `Asia/Kolkata`) so assessment dates and times follow your calendar day. |
 | `ORS_SRS_ENV` | no | `dev` turns off the Secure cookie flag so http://localhost works. |
@@ -70,12 +94,16 @@ Other commands: `python app.py rebuild-summaries` recomputes the client list's s
 ## Using it
 
 1. **Clients** page: **+ Add client** opens a side panel (first and last name, age band). The ID is `first-last`; a repeated name becomes `first-last-2`, `-3`, and so on.
-2. The list shows each client's **Status** (No link, Awaiting client, In progress, Completed, Expired, Revoked), **Sessions**, **Last session**, latest ORS and SRS, a red **Needs attention** badge, and short flag chips (hover one for its definition). Use **Filters** for attention, status, age band, clinical flag and sort order; active filters show as chips you can remove. The URL always reflects the filters, so a filtered view can be bookmarked. The header's **Recent assessments** shows every result, newest first.
+2. The list shows each client's **Status** (No link, Awaiting client, In progress, Completed, Expired, Revoked), **Sessions**, **Last session**, latest ORS and SRS, a red **Needs attention** badge, and short flag chips (hover one for its definition). Use **Filters** for attention, status, age band, clinical flag and sort order; active filters show as chips you can remove. The URL always reflects the filters, so a filtered view can be bookmarked. The header's **Recent assessments** shows every result, newest first, and **Caseload** summarises all your clients at once.
 3. Open a client, choose ORS, SRS or both, press **Create session link**. The link is displayed **once** (only its hash is stored). Copy it and send it to the client.
 4. The client opens the link, marks each line (drag with a mouse, pen or finger; or use the arrow keys, Home and End), and finishes. Nothing numeric is shown to them. The link then closes. It also closes after 7 days or when you revoke it.
 5. The client page in your portal updates by itself within about 5 seconds: status, history, clinical summary, trend charts, domain chart, flags. Hover or tab to any chart point for its detail. **View report** shows the three PCOMS sheets inside the portal; **Download .xlsx** saves the workbook; **Print report** gives a clean printout. A **Dark mode** toggle is in the header (it follows your system setting until you choose).
 
 An ORS and an SRS taken on the same day, even from two separate links, share one session number.
+
+## Caseload page
+
+**Caseload** (calculated in the database from each client's first and latest ORS, for your clients only): how many are at or above the cutoff now, how many improved reliably (and how many of those crossed the cutoff), how many declined, the average ORS change, and a standardised effect size (average change divided by the spread of intake scores; hidden below 10 clients because fewer would mislead). Below it, the average ORS and SRS at each session number with the number of clients behind each point. Descriptive only: no prediction and no comparison with other practitioners. Averages by session number leave out people who stopped coming.
 
 ## Reference flags
 
@@ -83,11 +111,12 @@ Aids for clinical judgement, defined in `scoring.py`: ORS below 25 (13 to 17 yea
 
 ## Data and privacy
 
-- All records live in the database (`data/app.db` locally). `data/` is git-ignored. Back it up; it holds client names and scores.
+- All records live in the database (`data/app.db` locally). `data/` is git-ignored. Back it up; it holds client names and scores. Administrators' email addresses are stored too, and the portal sends mail (codes and notices only, never client data) through the provider you configure.
+- **Upgrading from 0.1.0:** the database layout changed (administrator ownership and sign-up fields) and there is no migration. Move the old `data/app.db` aside (`mv data/app.db data/app.db.v0.1.0-backup`) and run `python app.py setup` for a fresh start. A hosted v0.1.0 database must be recreated the same way.
 - Link tokens are stored only as SHA-256 hashes. The app sends a strict Content-Security-Policy and loads no third-party code or fonts.
 - ORS and SRS are copyrighted measures licensed for individual use. Check that your licence covers an online version and keep the copyright notices intact.
 - Not a security audit and not clinical validation. Verify scoring against hand-checked examples before real use.
 
 ## Layout
 
-`app.py` routes, models, export, command line. `render.yaml` Render Blueprint (Singapore, free plan, secrets asked for, never stored). `scoring.py` pure scoring and flags. `charts.py` SVG charts. `templates/` pages. `static/` styles and scripts (`vendor/motion.js` is the vendored animation library). `tests/` the suite.
+`app.py` routes, models, export, command line. `mailer.py` email backends. `twofactor.py` authenticator-app helpers. `render.yaml` Render Blueprint (Singapore, free plan, secrets asked for, never stored). `scoring.py` pure scoring and flags. `charts.py` SVG charts. `templates/` pages. `static/` styles and scripts (`vendor/motion.js` is the vendored animation library). `tests/` the suite.

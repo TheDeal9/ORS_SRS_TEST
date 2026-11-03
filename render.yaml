@@ -1,5 +1,5 @@
 # Render Blueprint for the ORS/SRS portal: New -> Blueprint -> pick this repository.
-# Render pre-fills everything below and asks only for the three `sync: false` values.
+# Render pre-fills everything below and asks for the `sync: false` values (database, first administrator, mail sender and key).
 # Region: Singapore is the closest Render region to India (there is no India region); keep the Neon database in
 # Singapore too (aws-ap-southeast-1) so each page's database queries stay on the same network, not across oceans.
 services:
@@ -29,4 +29,10 @@ services:
       - key: ORS_SRS_ADMIN_USERNAME  # first administrator's ID; used only on the very first start
         sync: false
       - key: ORS_SRS_ADMIN_PASSWORD_HASH  # output of `python app.py hash-password`; used only on the very first start
+        sync: false
+      - key: ORS_SRS_MAIL  # one-time codes go out over HTTPS: Render's free plan blocks the SMTP ports (25, 465, 587)
+        value: brevo
+      - key: ORS_SRS_MAIL_FROM  # a sender address you have verified in Brevo, for example "ORS SRS Portal <you@example.com>"
+        sync: false
+      - key: ORS_SRS_BREVO_API_KEY  # Brevo > SMTP & API > API keys; used only to send codes and account notices
         sync: false

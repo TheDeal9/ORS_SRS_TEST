@@ -107,3 +107,58 @@ def domains_svg(rows, items, title):
                    f'tabindex="0" data-tip="{escape(tip)}" aria-label="{escape(tip.replace(chr(10), ". "))}"/>')
     out.append('</svg>')
     return Markup(''.join(out))
+
+
+OUTCOME_ORDER = ('csc', 'up', 'flat', 'down')
+
+
+def outcome_bar_svg(parts, title):
+    """One horizontal bar split by outcome. parts: [(class, label, count)] in OUTCOME_ORDER. The exact numbers and the
+    glyph that names each part sit in the table beside it, so colour is never the only carrier of meaning."""
+    total = sum(n for _c, _l, n in parts)
+    if not total:
+        return Markup('')
+    out = [f'<svg class="chart bar" viewBox="0 0 {W} 56" role="group" aria-label="{escape(title)}">']
+    x, width = 4.0, W - 8.0
+    for cls, label, n in parts:
+        if not n:
+            continue
+        w = width * n / total
+        tip = f'{label}\n{n} of {total} client{"s" if total != 1 else ""} ({100 * n / total:.0f}%)'
+        out.append(f'<rect class="seg {cls}" x="{x:.1f}" y="14" width="{w:.1f}" height="28" tabindex="0" '
+                   f'data-tip="{escape(tip)}" aria-label="{escape(tip.replace(chr(10), ". "))}"/>')
+        x += w
+    out.append('</svg>')
+    return Markup(''.join(out))
+
+
+def session_means_svg(rows, title, srs_cutoff, ymax=40):
+    """Average ORS and SRS total at each session number, with the number of clients behind each point as bars.
+    rows: [{'no', 'ORS': (mean, n)|None, 'SRS': (mean, n)|None}]. Only session numbers that exist are drawn."""
+    if not rows:
+        return Markup('')
+    p = _Plot(len(rows), ymax)
+    top_n = max(n for r in rows for k in ('ORS', 'SRS') if r[k] for n in [r[k][1]])
+    base = p.y(0)
+    out = [f'<svg class="chart wide" viewBox="0 0 {W} {H}" role="group" aria-label="{escape(title)}">',
+           _axes(p, range(0, ymax + 1, 10), [r['no'] for r in rows])]
+    colw = p.inner / (p.n - 1) if p.n > 1 else p.w
+    for i, r in enumerate(rows):  # sample size, drawn first so the lines sit on top
+        n = max((r[k][1] for k in ('ORS', 'SRS') if r[k]), default=0)
+        h = 38 * n / top_n
+        out.append(f'<rect class="nbar" x="{p.x(i) - min(colw, 40) * 0.3:.1f}" y="{base - h:.1f}" width="{min(colw, 40) * 0.6:.1f}" height="{h:.1f}"/>')
+    out.append(f'<line class="cutoff" x1="{LEFT}" x2="{W - RIGHT}" y1="{p.y(srs_cutoff):.1f}" y2="{p.y(srs_cutoff):.1f}"/>'
+               f'<text class="axis cut" x="{W - RIGHT + 6}" y="{p.y(srs_cutoff) + 4:.1f}">SRS {srs_cutoff}</text>')
+    for kind, cls, shape in (('ORS', 's1', 'circle'), ('SRS', 's2', 'square')):
+        pts = [(i, r[kind][0]) for i, r in enumerate(rows) if r[kind]]
+        if len(pts) > 1:
+            out.append(f'<polyline class="series {cls}" points="' + ' '.join(f'{p.x(i):.1f},{p.y(v):.1f}' for i, v in pts) + '"/>')
+        for i, v in pts:
+            out.append(f'<g class="pt {cls}">{_marker(shape, p.x(i), p.y(v))}</g>')
+    for i, r in enumerate(rows):
+        tip = f'Session {r["no"]}\n' + '\n'.join(
+            f'{k} average {r[k][0]:g} (from {r[k][1]} client{"s" if r[k][1] != 1 else ""})' if r[k] else f'No {k} at this session' for k in ('ORS', 'SRS'))
+        out.append(f'<rect class="col" x="{p.x(i) - colw / 2:.1f}" y="{TOP}" width="{colw:.1f}" height="{H - TOP - BOTTOM}" '
+                   f'tabindex="0" data-tip="{escape(tip)}" aria-label="{escape(tip.replace(chr(10), ". "))}"/>')
+    out.append('</svg>')
+    return Markup(''.join(out))

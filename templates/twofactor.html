@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>Two-step sign in</title>
+<script src="{{ url_for('static', filename='theme.js') }}"></script><link rel="icon" href="data:,"><link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}"></head>
+<body class="center"><button class="icon-btn theme-corner" type="button" data-theme-toggle aria-pressed="false">Dark mode</button>
+<div class="card-page reveal"><h1>Enter your code</h1>
+{% if method == 'totp' %}<p>Open your authenticator app and enter the six-digit code it shows for the ORS SRS Portal.</p>
+{% else %}<p>We emailed a six-digit code to <strong>{{ email }}</strong>. It works once and expires in 10 minutes.</p>{% endif %}
+{% with messages = get_flashed_messages() %}{% if messages %}<p class="warn-box">{{ messages[0] }}</p>{% endif %}{% endwith %}
+<form method="post" action="{{ url_for('main.admin_2fa') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+<label for="code">Code</label><input class="otp" type="text" id="code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9 ]*" maxlength="7" required autofocus>
+<button class="btn" type="submit">Sign in</button></form>
+<form method="post" action="{{ url_for('main.admin_2fa_resend') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn light" type="submit">{{ 'Email me a code instead' if method == 'totp' else 'Send a new code' }}</button></form>
+<p class="hint"><a href="{{ url_for('main.admin_login') }}">Start again</a></p></div>
+<script src="{{ url_for('static', filename='vendor/motion.js') }}" defer></script><script src="{{ url_for('static', filename='admin.js') }}" defer></script></body></html>

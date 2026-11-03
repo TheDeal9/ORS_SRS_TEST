@@ -20,6 +20,20 @@
 <div class="field"><button class="btn" type="submit">{{ 'Create a new recovery code' if admin.recovery_hash else 'Create a recovery code' }}</button></div></form></section>
 </div>
 
+<section class="panel reveal"><h2>Two-step sign-in</h2>
+{% if admin.email %}<p class="muted">Your email <strong>{{ admin.email }}</strong> is confirmed. Every sign-in asks for a code{% if totp_on %} from your authenticator app (or one we email you){% else %} we email you{% endif %}.</p>
+{% else %}<p class="muted"><strong>Two-step sign-in is off.</strong> Confirm an email address and every sign-in will also ask for a code we send you.{% if admin.pending_email %} <strong>{{ admin.pending_email }}</strong> is waiting for its code.{% endif %}</p>{% endif %}
+{% if mail %}<form method="post" action="{{ url_for('main.account_email') }}" class="two"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="text" name="username" value="{{ admin.username }}" autocomplete="username" hidden>
+<div class="field"><label for="email">{{ 'New email address' if admin.email else 'Email address' }}</label><input type="email" id="email" name="email" autocomplete="email" maxlength="254" required></div>
+<div class="field"><label for="cur4">Current password</label><input type="password" id="cur4" name="current" autocomplete="current-password" required></div>
+<div class="field"><button class="btn" type="submit">Send a code to this address</button></div></form>
+{% else %}<p class="muted">This server is not set up to send email, so an address cannot be confirmed here. See the README, "Email".</p>{% endif %}
+{% if totp_on %}<h3>Authenticator app: on</h3><form method="post" action="{{ url_for('main.account_totp_disable') }}" class="two" data-confirm="Turn the authenticator app off? Sign-in will use emailed codes only."><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="text" name="username" value="{{ admin.username }}" autocomplete="username" hidden>
+<div class="field"><label for="dcode">Code from the app</label><input type="text" id="dcode" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9 ]*" maxlength="7" required></div>
+<div class="field"><label for="cur5">Current password</label><input type="password" id="cur5" name="current" autocomplete="current-password" required></div>
+<div class="field"><button class="btn danger" type="submit">Turn off the authenticator app</button></div></form>
+{% elif admin.email %}<p><a class="btn light" href="{{ url_for('main.account_totp') }}">Set up an authenticator app</a></p><p class="muted">Optional. An app such as Google Authenticator, Aegis or 1Password works without email delivery. The emailed code stays available if you lose the phone.</p>{% endif %}</section>
+
 <section class="panel reveal"><h2>API keys</h2>
 <p class="muted">A key lets the command line or a script read this portal (read-only). Each key belongs to you, is shown once, and can be revoked. Use it with <code>ORS_SRS_API_KEY=&lt;key&gt; python app.py cli clients</code>. Do not use the secret key for this.</p>
 {% if keys %}<div class="tablewrap"><table><thead><tr><th>Label</th><th>Starts with</th><th>Created</th><th>Last used</th><th>Status</th><th></th></tr></thead><tbody>
@@ -31,4 +45,5 @@
 <div class="field"><label for="klabel">Label for the new key</label><input type="text" id="klabel" name="label" maxlength="60" autocomplete="off" placeholder="for example: laptop" required></div>
 <div class="field"><label for="cur3">Current password</label><input type="password" id="cur3" name="current" autocomplete="current-password" required></div>
 <div class="field"><button class="btn" type="submit">Create API key</button></div></form></section>
+<p class="muted">ORS/SRS portal version {{ version }}</p>
 {% endblock %}

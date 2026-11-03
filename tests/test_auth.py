@@ -111,7 +111,9 @@ def test_unknown_id_and_wrong_password_look_identical_and_both_cost_a_hash_check
     c = app.test_client()
     a = c.post('/admin/login', data={'username': 'admin', 'password': 'wrong'})
     b = c.post('/admin/login', data={'username': 'nobody', 'password': 'wrong'})
-    assert a.status_code == b.status_code == 200 and a.get_data() == b.get_data()
+    # Flask-WTF signs the CSRF token with the current second, so two pages a second apart differ in that one value only.
+    page = lambda r: re.sub(r'name="csrf_token" value="[^"]*"', '', r.get_data(as_text=True))
+    assert a.status_code == b.status_code == 200 and page(a) == page(b)
     assert len(used) == 2 and used[1] == app_module.DUMMY_HASH  # unknown ID still ran a full comparison
 
 
@@ -437,8 +439,8 @@ def cli_env(monkeypatch, tmp_path):
     return tmp_path
 
 
-def type_into(monkeypatch, username, *passwords):
-    monkeypatch.setattr(builtins, 'input', lambda prompt='': username)
+def type_into(monkeypatch, username, *passwords, email=''):
+    monkeypatch.setattr(builtins, 'input', lambda prompt='': email if 'mail' in prompt else username)
     answers = iter(passwords)
     monkeypatch.setattr(getpass, 'getpass', lambda prompt='': next(answers))
 

@@ -12,13 +12,14 @@ Working notes for Claude Code:
 
 A private web portal that digitises the PCOMS outcome measures: the **ORS** (Outcome Rating Scale) and **SRS** (Session Rating Scale). A practitioner sends a client a one-time link; the client marks four 10 cm lines; the server turns each mark into a 0 to 10 score and stores it. Scores are **never shown to the client**. The practitioner sees everything inside the portal: client list, per-client history, trend charts, reference flags, per-assessment detail and an in-portal report viewer. Excel is an optional download generated on demand.
 
-Origin: the project started as a ChatGPT-built prototype (log kept in `Automate_ORS_SRS_Excel_Scoring.md`) and was rebuilt in phases. The owner is a single practitioner; this is a one-practitioner tool, not a multi-tenant service (the ORS/SRS licence is for individual use).
+Origin: the project started as a ChatGPT-built prototype (log kept in `Automate_ORS_SRS_Excel_Scoring.md`) and was rebuilt in phases. The owner runs one portal; from v0.1.1 other practitioners may register as administrators (email-confirmed, owner-approved) and each sees only their own clients. It is still not a general multi-tenant service: the ORS/SRS licence is for individual use, so the owner gates who registers, and confirming the licence covers this stays an open item.
 
 Hard product constraints from the owner:
-- Self-sufficient: every assessment must be viewable in the portal. No third-party workflows, integrations, trackers, CDNs or pingers at runtime.
+- Self-sufficient: every assessment must be viewable in the portal. No third-party workflows, integrations, trackers, CDNs or pingers at runtime. The one deliberate exception (v0.1.1): the portal sends plain-text one-time codes and account notices through the mail provider the owner configures (Brevo HTTPS API on Render free, which blocks SMTP; or SMTP). No client data is ever sent.
 - Free to host (target: Render free web service + Neon free Postgres). See `DEPLOY.md`.
 - Client IDs are unique and built from first + last name (`jane-patel`, then `jane-patel-2`, ...). Never duplicate an ID.
-- The client must not learn their score. Admin sign-in uses an ID and password.
+- The client must not learn their score. Admin sign-in uses an ID and password, then (once the admin has a confirmed email) a one-time emailed code or an authenticator-app code.
+- An administrator sees only their own clients, assessments, reports, exports and API data. Another admin's rows are 404, never 403. The owner approves administrators but never sees their clients.
 
 ## Status
 
@@ -30,6 +31,7 @@ Hard product constraints from the owner:
 | 3 Close | strict CSP, keyboard and touch use, security headers, one-time hashed links | done |
 | 4 Deploy | steps written in `DEPLOY.md`, start command verified locally against Postgres; **not yet deployed** (needs the owner's GitHub, Neon and Render accounts) | ready |
 | 3b Auth v2 | admins in the database, recovery-code reset, account page, per-admin API keys, read-only `/api/v1`, `python app.py cli` | done |
+| 6 Accounts (v0.1.1) | admin sign-up with email proof and owner approval, per-admin ownership of all data, emailed-code and TOTP second step, row-locked concurrent writes, caseload page with database-side calculations | done |
 | 5 Operate | backup drill, typed delete confirmation, licence confirmation, consent text | open |
 
 Progress log and the original gap analysis live in the plan file at `~/.claude/plans/the-app-is-running-immutable-valley.md` (outside the repo).
@@ -40,8 +42,10 @@ Progress log and the original gap analysis live in the plan file at `~/.claude/p
 |---|---|
 | `render.yaml` | Render Blueprint (service, region, env vars). Secrets are `sync: false`, guarded by a test. |
 | `app.py` | Flask app factory `create_app()`, models, all routes, Excel export, report viewer, security headers. CLI (`python app.py <cmd>`, list with a bad command): `setup`, `create-admin`, `reset-password`, `admins`, `api-key`, `cli` (reads the JSON API with an API key), `hash-password` (for a host), `rebuild-summaries`. `.env` is read only by this CLI entry point, never by `create_app()` or gunicorn. Auth section of `app.py`: `Admin`/`ApiKey` helpers, `admin_required`, `api_required`; routes `/admin/login|logout|forgot|account*`, `/api/v1/*`. |
+| `mailer.py` | Pure stdlib mail sender: `smtp`, `brevo` (HTTPS API), `console` (dev only), `memory` (tests). `MailError` messages never contain a body, key or address. |
+| `twofactor.py` | Pure TOTP helpers: Fernet-sealed secret (key derived from `SECRET_KEY`), provisioning URI, QR as SVG data URI, `verify` with one step of drift and replay refusal. |
 | `scoring.py` | Pure logic, no Flask or DB: position to score, totals, reference flags and their stable codes, reliable-change rules. The single home of every clinical threshold. |
-| `charts.py` | Server-rendered SVG charts (total trend, ORS domains). Tooltips come from `data-tip` attributes plus `static/admin.js`. |
+| `charts.py` | Server-rendered SVG charts (total trend, ORS domains, caseload outcome bar, averages by session number). Tooltips come from `data-tip` attributes plus `static/admin.js`. |
 | `templates/` | Jinja pages. `base.html` is the admin shell. Client-facing pages: `assessment.html`, `closed.html`. Auth/landing: `login.html`, `landing.html`. |
 | `static/app.css` | All styles, light and dark tokens. **No inline CSS anywhere** (CSP). |
 | `static/admin.js` | Admin behaviour (theme toggle, drawer, tabs, tooltips, live refresh, animation), driven by `data-` attributes. |
@@ -54,13 +58,15 @@ Progress log and the original gap analysis live in the plan file at `~/.claude/p
 
 ## Data model (SQLAlchemy, `app.py`)
 
-- `Client`: `slug` (unique, indexed; this is the "Client ID" in the UI and in URLs), names, `age_band` (`adult` or `teen`), plus **summary columns kept in sync by `refresh_summary()`**: `session_count`, `last_session_on`, `ors_latest`, `srs_latest`, `flag_codes` (comma-delimited with outer commas, for example `,ors_low,srs_item,`), `needs_attention`. They let the clients list filter, sort and page in SQL.
+- `Client`: `admin_id` (owner, FK, not null), `slug` (the "Client ID" in the UI and URLs; **unique per administrator**: `UNIQUE(admin_id, slug)`), names, `age_band` (`adult` or `teen`), plus **summary columns kept in sync by `refresh_summary()`**: `session_count`, `last_session_on`, `ors_latest`, `srs_latest`, `flag_codes` (comma-delimited with outer commas, for example `,ors_low,srs_item,`), `needs_attention`. They let the clients list filter, sort and page in SQL.
 - `Link`: one-time session link. Stores only the SHA-256 of the token. `kinds` is `ORS`, `SRS` or `ORS,SRS`. Expires after 7 days, closes when every requested form is submitted, can be revoked. Only one active link per client (a new one revokes the old).
-- `Admin`: `username` (unique, lower-case), `password_hash`, `recovery_hash` (SHA-256 of a 96-bit code, nullable), `last_login_at`. `stamp` = first 16 hex of SHA-256(password_hash); the session cookie holds `aid` + `stamp`, so a password change ends every other session and SECRET_KEY alone cannot forge one. The first admin is seeded from `ORS_SRS_ADMIN_USERNAME` + `ORS_SRS_ADMIN_PASSWORD_HASH` **only while the table is empty** (`seed_admin`); afterwards the database wins and those variables are ignored.
+- `Admin`: `username` (unique, lower-case), `password_hash`, `recovery_hash` (SHA-256 of a 96-bit code, nullable), `last_login_at`. `stamp` = first 16 hex of SHA-256(password_hash); the session cookie holds `aid` + `stamp`, so a password change ends every other session and SECRET_KEY alone cannot forge one. The first admin is seeded from `ORS_SRS_ADMIN_USERNAME` + `ORS_SRS_ADMIN_PASSWORD_HASH` **only while the table is empty** (`seed_admin`); afterwards the database wins and those variables are ignored. v0.1.1 adds: `status` (`unverified` → `pending` → `active` ↔ `disabled`; only `active` holds a session or API key), `is_owner` (the first administrator created; approves the rest), `email` (unique, set only once proven) and `pending_email`, one live email code (`otp_hash` = HMAC of SECRET_KEY, id and purpose; `otp_purpose` `verify`|`login`, `otp_expires_at`, `otp_tries`), `mfa_fails` + `locked_until`, and `totp_secret` (Fernet-sealed) + `totp_enabled_at` + `totp_last_step`. `Admin.clients` has **no** delete cascade.
 - `ApiKey`: per-admin read-only key (`ors_` + 43 chars), only SHA-256 stored, shown once, revocable, max 10 active per admin. Accepted only as `Authorization: Bearer` on `/api/v1/*`, which ignores cookies (that is why those routes need no CSRF). A password reset (recovery code or CLI) revokes all of the admin's keys.
-- `Assessment`: one ORS or SRS result. `scores` is JSON keyed by **canonical item names** (ORS: Individually, Interpersonally, Socially, Overall. SRS: Relationship, Goals and Topics, **Method/Approach**, Overall). The client page labels the third SRS line "Approach or Method"; the server maps by position, never by label. `UNIQUE(client_pk, session_no, type)`.
+- `Assessment`: one ORS or SRS result. `scores` is JSON keyed by **canonical item names** (ORS: Individually, Interpersonally, Socially, Overall. SRS: Relationship, Goals and Topics, **Method/Approach**, Overall). The client page labels the third SRS line "Approach or Method"; the server maps by position, never by label. `UNIQUE(client_pk, session_no, type)`. `UNIQUE(link_pk, type)` as well: a link holds at most one ORS and one SRS.
 - Sessions: an ORS and an SRS taken the same day share one session number, even from separate links (`next_session_no`). `session_no` is assigned at the first submission.
 - Status column on the clients list = state of each client's **newest** link: none, waiting, in_progress, completed, expired, revoked. `state_expr()` (SQL, used for filtering) and `link_state()` (Python, used for display) must always agree; a test enforces it.
+- Writes that read-then-write a client or an admin take `lock_row()` first (`lock_client`, `lock_admin`): Postgres `SELECT .. FOR UPDATE`; SQLite, which has no row locks, uses an in-process lock per row. That is what keeps session numbers, summary columns, the one-live-link rule, try counters and TOTP replay refusal right under simultaneous requests; the UNIQUE constraints are the last line of defence.
+- Calculations done in SQL (`total_sql`, `client_series`, `caseload_stats`, `caseload_by_session`): totals, change since intake and previous (window functions), caseload outcome counts and effect-size sums. Thresholds still come only from `scoring.py`; tests assert the SQL classes equal `scoring.ors_status`.
 
 ## Clinical rules (all in `scoring.py`; owner chose these)
 
@@ -75,16 +81,16 @@ Progress log and the original gap analysis live in the plan file at `~/.claude/p
 
 ## Security invariants (do not weaken; tests cover each)
 
-1. No default or hardcoded secrets. The app refuses to start without `ORS_SRS_SECRET_KEY` (16+ chars), and, while no administrator exists, without a well-formed `ORS_SRS_ADMIN_PASSWORD_HASH` (shape-checked, because a shell that expands `$` corrupts hashes). Passwords, recovery codes and API keys are stored only as hashes; password 10+ chars.
+1. No default or hardcoded secrets. The app refuses to start without `ORS_SRS_SECRET_KEY` (16+ chars), and, while no administrator exists, without a well-formed `ORS_SRS_ADMIN_PASSWORD_HASH` (shape-checked, because a shell that expands `$` corrupts hashes). Passwords, recovery codes, API keys and emailed codes are stored only as hashes (codes as an HMAC); authenticator secrets only sealed; password 10+ chars.
 2. The server computes scores. The browser sends mark positions (0 to 1) only. No response or page for a client contains a score or the client's ID.
 3. CSRF on every admin POST (Flask-WTF). `/api/save` is exempt because the one-time token authenticates it. `WTF_CSRF_SSL_STRICT=False` is deliberate: with `Referrer-Policy: no-referrer` browsers send no Referer, and a strict check would reject every HTTPS POST (found and fixed during the deployment check; regression test exists).
-4. Login limited to 5 POSTs per minute per address. `ORS_SRS_PROXY_HOPS` must be `1` behind Render so the real visitor address and `https` scheme are used.
+4. Login, sign-up (also 20 a day), verify, second-step and resend limited to 5 POSTs per minute per address; code tries are also counted in the database (5 per code, lock after 10 wrong codes). `ORS_SRS_PROXY_HOPS` must be `1` behind Render so the real visitor address and `https` scheme are used.
 5. Strict CSP: `script-src 'self'; style-src 'self'`. No inline `<script>`, `<style>`, `style=` attribute or `on*=` handler, in templates or in JS-generated markup. Setting `element.style.x` from JS is allowed. Tests scan every page for violations.
 6. Link tokens are shown once, stored hashed, kept out of logs (no gunicorn access log), out of `Referer`, and pages are `no-store`.
 7. Filter and sort inputs are whitelisted; search text is escaped for LIKE; names are length-capped on the server.
 8. Admin session cookie is Secure, HttpOnly, SameSite=Lax, 8 hours. `ORS_SRS_ENV=dev` turns Secure off for local http only.
 9. Client data never goes into logs, commits, test fixtures or chat output.
-10. Account changes (password, recovery code, API key) re-ask for the current password; login, forgot and those forms are limited to 5 POSTs a minute; unknown ID and wrong password give the same message and cost the same hash check. Forgot-password uses a recovery code, never email (no third-party services).
+10. Account changes (password, recovery code, API key) re-ask for the current password; login, forgot and those forms are limited to 5 POSTs a minute; unknown ID and wrong password give the same message and cost the same hash check. Forgot-password uses a recovery code, never email. Mail carries one-time codes and plain notices only (no links, no client data); a code never reaches a log, flash or response. A password-only browser holds `pre`, not `aid`, so nothing opens until the second step passes, and an admin with an email is refused (not waved through) when mail is down.
 
 ## Commands
 
@@ -92,13 +98,13 @@ Progress log and the original gap analysis live in the plan file at `~/.claude/p
 source .venv/bin/activate                         # Python 3.14 was used; .python-version says 3.14
 python -m pip install -r requirements-dev.txt
 
-python -m pytest                                  # whole suite (415 tests at time of writing, about 2 minutes)
+python -m pytest                                  # whole suite (625 tests at time of writing, about 4 minutes)
 python -m pytest tests/test_security.py -k csrf   # a slice
 TEST_DATABASE_URL='postgresql+psycopg://user@host:port/scratch_db' python -m pytest   # same suite on Postgres (drops its tables!)
 
 python app.py setup                               # asks for ID + password; creates/resets the admin in the DB, writes secret key + ORS_SRS_ENV=dev to .env (git-ignored, mode 600), prints a recovery code once
 python app.py                                     # loads .env, then http://127.0.0.1:5000/admin/login
-python app.py admins | create-admin ID | reset-password ID | api-key ID [label]   # manage administrators (works against any DATABASE_URL, no SECRET_KEY needed)
+python app.py admins | create-admin ID | reset-password ID | reset-2fa ID | api-key ID [label]   # manage administrators (works against any DATABASE_URL, no SECRET_KEY needed)
 ORS_SRS_API_KEY=ors_... python app.py cli me|clients|client ID|recent           # read a running portal through its API
 python app.py hash-password                       # prints just a hash for a host's first start (single-quote it in a shell; $ is special)
 python app.py rebuild-summaries                   # recompute Client summary columns (after manual data fixes or restores)
@@ -110,7 +116,7 @@ Configuration is environment variables (locally the same names may sit in `.env`
 
 ## Testing
 
-`TESTING.md` is the guide (commands, what each file covers, expected results, Postgres setup, a 14-step manual browser checklist). Test files: `test_scoring.py` (pure logic and charts), `test_security.py` (secrets, route gating, CSRF, rate limit, headers, tokens, `.env` loader), `test_auth.py` (admin accounts, sessions, recovery, API keys, JSON API, CLI), `test_flow.py` (client journey, one-time links, session numbering, races), `test_admin.py` (clients list, filters, summaries, client page, report viewer, deletes, Excel), `test_ui.py` (CSP compliance, dark mode contrast, motion, keyboard and chart markup). `conftest.py` has the fixtures (`app`, `admin`, `anon`) and helpers (`add_client`, `new_link`, `submit`, `complete_session`).
+`TESTING.md` is the guide (commands, what each file covers, expected results, Postgres setup, a 14-step manual browser checklist). Test files: `test_scoring.py` (pure logic and charts), `test_security.py` (secrets, route gating, CSRF, rate limit, headers, tokens, `.env` loader), `test_auth.py` (admin accounts, sessions, recovery, API keys, JSON API, CLI), `test_flow.py` (client journey, one-time links, session numbering, races), `test_admin.py` (clients list, filters, summaries, client page, report viewer, deletes, Excel), `test_ui.py` (CSP compliance, dark mode contrast, motion, keyboard and chart markup). v0.1.1 adds `test_signup.py` (sign-up, email proof, owner approval), `test_2fa.py` (emailed codes, authenticator app, lockout), `test_ownership.py` (cross-admin isolation matrix), `test_caseload.py` (SQL calculations equal the Python rules; caseload page), `test_concurrency.py` (real threads; run it on Postgres too) and `test_mailer.py` (SMTP and Brevo against local stubs). Compare whole pages only after removing the `csrf_token` value: Flask-WTF signs it with the current second. `conftest.py` has the fixtures (`app`, `admin`, `anon`) and helpers (`add_client`, `new_link`, `submit`, `complete_session`).
 
 Rules for changes: run the full suite before saying work is done; add a test that fails without your change; when a test and the code disagree, work out which is wrong rather than loosening the test. The suite has been checked by deliberately breaking the code (mutation checks); keep it that way.
 
@@ -153,7 +159,7 @@ Repo `github.com/TheDeal9/ORS_SRS_TEST` (public at the time of writing; the owne
 
 1. Deploy (owner action): follow `DEPLOY.md`, then run its first-run check.
 2. Phase 5: practise a backup and restore; typed confirmation before deleting a client; confirm the ORS/SRS licence covers an online version; add consent and retention text.
-3. Alembic before any schema change.
-4. Real concurrent-request test (two clients saving at once); the retry path is only simulated.
+3. Alembic before the next schema change (0.1.1 changed the schema with no migration because nothing was deployed; a 0.1.0 database must be recreated).
+4. (Done in 0.1.1: real concurrent-request tests on SQLite and Postgres.) Next: a shared rate-limit store if more than one worker is ever used, and a background mail queue if sending ever slows a request.
 5. Excel opened in desktop Excel (tests read it with openpyxl only).
 6. Possible later: soft-delete (archive) clients, editable session numbers, a shared rate-limit store if more than one worker is ever used.

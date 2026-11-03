@@ -15,6 +15,7 @@ ORS_CUTOFF = {'adult': 25, 'teen': 28}
 ORS_RELIABLE_CHANGE = 5
 SRS_CUTOFF = 36
 SRS_ITEM_FLOOR = 9
+EFFECT_SIZE_MIN_CLIENTS = 10  # a standardised mean change from fewer people is too unstable to show
 
 # Flag codes are stored on the client row, so keep them short and stable.
 # code -> (level, dashboard chip, tooltip, filter label). '{c}' is the ORS cutoff for the client's age band.
@@ -79,6 +80,18 @@ def srs_low_items(scores):
 def domain_changes(kind, first_scores, latest_scores):
     """[(item, intake, latest, change)] in item order."""
     return [(i, first_scores[i], latest_scores[i], round(latest_scores[i] - first_scores[i], 2)) for i in ITEMS[kind]]
+
+
+def effect_size(n, sum_change, sum_intake, sum_intake_sq):
+    """Standardised mean change of a caseload: mean (latest - intake) divided by the sample standard deviation of the
+    intake scores, over the n clients who have two or more ORS. The database supplies the four sums; this is only the last
+    step. None below EFFECT_SIZE_MIN_CLIENTS clients or when everyone started on the same score."""
+    if n < EFFECT_SIZE_MIN_CLIENTS:
+        return None
+    variance = (sum_intake_sq - sum_intake ** 2 / n) / (n - 1)
+    if variance <= 1e-9:
+        return None
+    return round((sum_change / n) / math.sqrt(variance), 2)
 
 
 def client_flags(age_band, ors_totals, srs_scores):

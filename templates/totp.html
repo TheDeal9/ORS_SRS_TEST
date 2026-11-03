@@ -1,0 +1,13 @@
+{% extends 'base.html' %}
+{% block title %}Authenticator app · PCOMS{% endblock %}
+{% block content %}
+<div class="heading reveal"><div><h1>Authenticator app</h1>
+<div class="id">Scan the code with an authenticator app, then enter the six-digit code it shows.</div></div></div>
+<section class="panel reveal"><div class="qr"><img src="{{ qr }}" alt="QR code for your authenticator app" width="200" height="200"></div>
+<p class="muted">Cannot scan it? In the app choose "enter a setup key" and type: <code>{{ key }}</code></p>
+<form method="post" action="{{ url_for('main.account_totp') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="text" name="username" value="{{ g.admin.username }}" autocomplete="username" hidden>
+<div class="field"><label for="tcode">Code from the app</label><input class="otp" type="text" id="tcode" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9 ]*" maxlength="7" required></div>
+<div class="field"><label for="tcur">Current password</label><input type="password" id="tcur" name="current" autocomplete="current-password" required></div>
+<div class="field"><button class="btn" type="submit">Turn on the authenticator app</button></div></form>
+<p class="muted"><a href="{{ url_for('main.account') }}">Cancel</a></p></section>
+{% endblock %}

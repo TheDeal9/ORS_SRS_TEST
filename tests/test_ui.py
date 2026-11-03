@@ -32,7 +32,20 @@ def pages(app, admin, anon):
     secret_page = admin.post('/admin/account/recovery', data={'current': PASSWORD}, follow_redirects=True).get_data(as_text=True)
     code = re.search(r'value="([0-9a-f]{4}(?:-[0-9a-f]{4}){5})"', secret_page).group(1)
     key_page = admin.post('/admin/account/keys', data={'label': 'laptop', 'current': PASSWORD}, follow_redirects=True).get_data(as_text=True)
+    from app import Admin, db
+    with app.app_context():
+        Admin.query.filter_by(username='admin').one().email = 'owner@example.test'  # totp setup needs a confirmed email
+        db.session.commit()
+    half = app.test_client()  # password right, code not yet entered
+    half.post('/admin/signup', data={'username': 'dr-new', 'email': 'new@example.test', 'password': PASSWORD, 'confirm': PASSWORD})
+    verifying = html(half, '/admin/verify')
+    from conftest import make_user
+    make_user(app, 'doc', email='doc@example.test')
+    second = app.test_client()
+    second.post('/admin/login', data={'username': 'doc', 'password': PASSWORD})
     out = {
+        'signup': html(anon, '/admin/signup'), 'verify': verifying, 'twofactor': html(second, '/admin/2fa'),
+        'totp': html(admin, '/admin/account/totp'), 'admins': html(admin, '/admin/admins'), 'caseload': html(admin, '/admin/caseload'),
         'landing': html(anon, '/'), 'login': html(anon, '/admin/login'), 'closed': html(anon, '/client/nope'),
         'assessment': html(anon, f'/client/{token}'), 'clients': html(admin, '/admin'), 'recent': html(admin, '/admin/recent'),
         'client': html(admin, f'/admin/client/{cid}'), 'detail': html(admin, f'/admin/assessment/{aid}'),
@@ -48,7 +61,7 @@ def pages(app, admin, anon):
 
 # ---- strict CSP: nothing inline, nothing third-party ---------------------------------------------------
 
-PAGES = ['landing', 'login', 'closed', 'assessment', 'clients', 'recent', 'client', 'detail', 'report',
+PAGES = ['signup', 'verify', 'twofactor', 'totp', 'admins', 'caseload', 'landing', 'login', 'closed', 'assessment', 'clients', 'recent', 'client', 'detail', 'report',
          'forgot', 'account', 'account_secret', 'account_key', 'recovery_done']
 
 
@@ -87,7 +100,7 @@ def test_scripts_emit_no_inline_styles_handlers_or_eval(name):
 
 
 def test_scripts_are_loaded_deferred_and_motion_comes_first(pages):
-    for name in ('clients', 'recent', 'client', 'report', 'login'):
+    for name in ('clients', 'recent', 'client', 'report', 'login', 'signup', 'verify', 'twofactor', 'totp', 'admins', 'caseload'):
         tags = re.findall(r'<script src="([^"]+)"([^>]*)>', pages[name])
         srcs = [t[0] for t in tags]
         assert srcs[0].endswith('theme.js') and not tags[0][1].strip()           # theme first, blocking, no flash of the wrong theme
@@ -160,7 +173,7 @@ def test_chart_series_are_visible_against_the_chart_surface_in_both_themes():
 
 
 def test_theme_toggle_exists_on_admin_and_login_pages_but_not_the_client_form(pages):
-    for name in ('clients', 'recent', 'client', 'report', 'login'):
+    for name in ('clients', 'recent', 'client', 'report', 'login', 'signup', 'verify', 'twofactor', 'totp', 'admins', 'caseload'):
         assert 'data-theme-toggle' in pages[name], name
     assert 'data-theme-toggle' not in pages['assessment']
 
