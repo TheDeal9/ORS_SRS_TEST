@@ -9,7 +9,7 @@ How the pieces fit: Render runs the code (no permanent disk on the free plan, so
 
 ```bash
 source .venv/bin/activate
-python -m pytest            # expect: 414 passed
+python -m pytest            # expect: 415 passed
 git status --short          # data/, .venv/ and .env must NOT be listed
 ```
 
@@ -23,12 +23,20 @@ The code is at `github.com/TheDeal9/ORS_SRS_TEST` (branch `main`). Update it wit
 
 ## 2. Create the database on Neon (Singapore)
 
-1. neon.com, sign up, create a project. **Region: Asia Pacific (Singapore), `aws-ap-southeast-1`.** Neon has no India region; Singapore is the nearest one it offers, and it matches the Render region so the app and database sit on the same network.
+1. neon.com, sign up, create a project (yours already exists: **ORS SRS Portal**, id `divine-cloud-09547430`, branch `production`). **Region: Asia Pacific (Singapore), `aws-ap-southeast-1`.** Neon has no India region; Singapore is the nearest one it offers, and it matches the Render region so the app and database sit on the same network.
 2. Open the project's **Connect** panel. Turn **Connection pooling off** and copy the **direct** connection string (the host does not contain `-pooler`). It looks like `postgresql://user:password@ep-xxxx.ap-southeast-1.aws.neon.tech/dbname?sslmode=require`.
    Why direct: Neon's pooled endpoint runs PgBouncer in transaction mode, which can reject the prepared statements the Postgres driver uses. One small web worker does not need a pooler.
-3. Keep that string private. It is your `DATABASE_URL`.
+3. Keep that string private. It is your `DATABASE_URL`. With the Neon CLI: `neon connection-string production` prints the direct string by default (`--pooled` for the other one), and `neon env pull --file .env.local` writes both as `DATABASE_URL` (pooled) and `DATABASE_URL_UNPOOLED` (direct). On Render use the **direct** value as `DATABASE_URL`.
 
 The tables are created automatically the first time the app starts. Nothing to import.
+
+## 2b. Neon tooling in this repository (already set up)
+
+`neon.ts` declares the Neon services (no Neon Auth, because the portal has its own sign-in, and one private bucket `assets`); `neon deploy` applies it and `neon config plan` shows drift. `.neon` (git-ignored) links this folder to the project. `package.json` exists only for `neon.ts`'s two dependencies; the app itself is Python and has no build step (`npm run build` does not exist and is not needed). The Neon agent skills are in `.claude/skills/` (listed in `skills-lock.json`), and `.mcp.json` registers the Neon MCP server **read-only, pinned to this project, with OAuth** (no key is stored; Claude Code asks you to sign in on first use).
+
+Neon's CLI writes connection strings into `.env` when it exists (`neon init`, `neon link`, `neon checkout`). Keep `.env` for local settings only, otherwise plain `python app.py` would use the Neon database. Use `neon env pull --file .env.local` (git-ignored) or `--no-env-pull`.
+
+Never run the test suite with `TEST_DATABASE_URL` pointing at `production`: it drops every table. Use a throwaway branch: `neon branches create --name check --parent production`, `neon connection-string check`, and `neon branches delete check` afterwards. From a distant laptop the full suite is slow (each query crosses the network), so run a subset there.
 
 ## 3. Make your first administrator's hash (on your own computer)
 
@@ -133,7 +141,7 @@ Also use **Download all reports (.zip)** on the Clients page for a spreadsheet c
 Why not Firebase (Firestore) or MongoDB Atlas instead:
 - **Firestore:** scheduled backups and point-in-time recovery need the paid Blaze plan (a billing account). The free quota (1 GiB, 20,000 writes a day) is fine, but there are no SQL unique constraints or joins, and the portal's session numbering, filtering, sorting and paging all depend on them.
 - **Atlas free (M0):** 0.5 GB, 100 operations a second; its backup add-on is a paid, optional feature (about $0.10 a day, capped near $3 a month, card required); it pauses after 30 days of inactivity; whether Mumbai is offered for free clusters I could not confirm.
-- Both would mean rewriting the data layer and re-proving the 414 tests, with a real risk to clinical records, for no free backup advantage. Neither moves the app itself into India, because Render has no India region.
+- Both would mean rewriting the data layer and re-proving the 415 tests, with a real risk to clinical records, for no free backup advantage. Neither moves the app itself into India, because Render has no India region.
 - If you later want managed backups, the cheapest route is Neon's paid plan (scheduled backups, 7-day history), a one-line change to `DATABASE_URL`.
 
 ## 10. Updating the app

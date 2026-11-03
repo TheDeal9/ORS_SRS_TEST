@@ -7,3 +7,7 @@ __pycache__/
 .pytest_cache/
 .vscode/
 Automate_ORS_SRS_Excel_Scoring.md
+.env.local
+.env.*.local
+.neon
+node_modules/

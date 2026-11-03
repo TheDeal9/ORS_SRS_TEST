@@ -53,6 +53,16 @@ def test_env_vars_configure_the_app(monkeypatch, tmp_path):
     assert c.post('/admin/login', data={'username': 'admin', 'password': 'pw-from-env'}).status_code == 200
 
 
+def test_the_direct_neon_string_wins_when_both_are_set(monkeypatch, tmp_path):
+    """`neon env pull` writes a pooled DATABASE_URL and a direct DATABASE_URL_UNPOOLED; the app wants the direct one."""
+    monkeypatch.setenv('ORS_SRS_SECRET_KEY', 'e' * 20)
+    monkeypatch.setenv('ORS_SRS_ADMIN_PASSWORD_HASH', generate_password_hash('pw-from-env'))
+    monkeypatch.setenv('DATABASE_URL', f'sqlite:///{tmp_path / "pooled.db"}')
+    assert create_app().config['SQLALCHEMY_DATABASE_URI'].endswith('pooled.db')  # only the one string: used as before
+    monkeypatch.setenv('DATABASE_URL_UNPOOLED', f'sqlite:///{tmp_path / "direct.db"}')
+    assert create_app().config['SQLALCHEMY_DATABASE_URI'].endswith('direct.db')
+
+
 @pytest.mark.parametrize('given, expected', [
     ('postgres://u:p@h/db', 'postgresql+psycopg://u:p@h/db'),
     ('postgresql://u:p@h/db?sslmode=require', 'postgresql+psycopg://u:p@h/db?sslmode=require'),

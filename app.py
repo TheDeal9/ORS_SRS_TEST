@@ -1091,7 +1091,9 @@ def create_app(config=None):
         SECRET_KEY=env('ORS_SRS_SECRET_KEY'),
         ADMIN_USERNAME=env('ORS_SRS_ADMIN_USERNAME', 'admin'),
         ADMIN_PASSWORD_HASH=env('ORS_SRS_ADMIN_PASSWORD_HASH'),
-        SQLALCHEMY_DATABASE_URI=database_url(env('DATABASE_URL')),
+        # Neon (`neon env pull`) writes a pooled DATABASE_URL and a direct DATABASE_URL_UNPOOLED. This app keeps one long-lived
+        # SQLAlchemy pool and runs create_all (DDL) at start, which Neon advises doing over the direct string.
+        SQLALCHEMY_DATABASE_URI=database_url(env('DATABASE_URL_UNPOOLED') or env('DATABASE_URL')),
         SQLALCHEMY_ENGINE_OPTIONS={'pool_pre_ping': True, 'pool_recycle': 300},  # serverless Postgres drops idle connections
         TIMEZONE=env('ORS_SRS_TIMEZONE', 'UTC'),
         TEMPLATE_FILE=env('PCOMS_TEMPLATE', str(BASE / 'PCOMS_template.xlsx')),

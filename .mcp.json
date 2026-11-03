@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "Neon": {
+      "type": "http",
+      "url": "https://mcp.neon.tech/mcp?readonly=true&projectId=divine-cloud-09547430"
+    }
+  }
+}
