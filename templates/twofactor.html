@@ -9,6 +9,9 @@
 <form method="post" action="{{ url_for('main.admin_2fa') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
 <label for="code">Code</label><input class="otp" type="text" id="code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9 ]*" maxlength="7" required autofocus>
 <button class="btn" type="submit">Sign in</button></form>
-<form method="post" action="{{ url_for('main.admin_2fa_resend') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn light" type="submit">{{ 'Email me a code instead' if method == 'totp' else 'Send a new code' }}</button></form>
-<p class="hint"><a href="{{ url_for('main.admin_login') }}">Start again</a></p></div>
+{% if method == 'totp' %}<form method="post" action="{{ url_for('main.admin_2fa') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+<label for="backup">Lost your phone? Use a backup code</label><input class="otp" type="text" id="backup" name="code" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="14" placeholder="abcde-fghij" required>
+<button class="btn light" type="submit">Sign in with a backup code</button></form>
+{% endif %}{% if method != 'totp' or can_email %}<form method="post" action="{{ url_for('main.admin_2fa_resend') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn light" type="submit">{{ 'Email me a code instead' if method == 'totp' else 'Send a new code' }}</button></form>
+{% endif %}<p class="hint"><a href="{{ url_for('main.admin_login') }}">Start again</a></p></div>
 <script src="{{ url_for('static', filename='vendor/motion.js') }}" defer></script><script src="{{ url_for('static', filename='admin.js') }}" defer></script></body></html>

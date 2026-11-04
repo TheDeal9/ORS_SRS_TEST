@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.1 fix: authenticator app without email (2026-11-04)
+
+The first Render deploy of 0.1.1 stopped at start with `ORS_SRS_MAIL_FROM must be a sender address` because the Blueprint switched mail on (`ORS_SRS_MAIL=brevo`) while the sender was empty. Mail is now off unless the owner turns it on, so two-step sign-in no longer depends on it.
+
+**Added**
+- The authenticator app needs no email or mail server. It is the main second step.
+- **Forced set-up** (`ORS_SRS_REQUIRE_2FA`, default on): an administrator with no second step is sent to `/admin/2fa/setup` after the password; nothing else opens until the app is on.
+- **Backup codes and recovery kit:** ten one-time codes (keyed hashes only, in `admin.backup_hashes`) usable in place of the app code; shown once with a **Download recovery kit** button and advice to save the file on the administrator's own computer; Account shows the number left and makes a new set (password required, old set cancelled). A password recovery code is added to the kit when the administrator had none.
+
+**Fixed**
+- An administrator whose authenticator secret can no longer be read (`SECRET_KEY` changed) and who has no email is now refused instead of signing in with the password alone.
+- `render.yaml` no longer sets `ORS_SRS_MAIL`.
+
+**Changed**
+- `reset-2fa` also deletes the backup codes. Turning the app off deletes them too.
+- Schema: one new nullable column, `admin.backup_hashes`. A database made before this fix needs `ALTER TABLE admin ADD COLUMN backup_hashes TEXT;` (nothing else).
+
 ## 0.1.1 (2026-11-03)
 
 Administrator sign-up, per-administrator data, a second sign-in step, concurrent-write protection and a Caseload page.

@@ -21,18 +21,25 @@
 </div>
 
 <section class="panel reveal"><h2>Two-step sign-in</h2>
-{% if admin.email %}<p class="muted">Your email <strong>{{ admin.email }}</strong> is confirmed. Every sign-in asks for a code{% if totp_on %} from your authenticator app (or one we email you){% else %} we email you{% endif %}.</p>
-{% else %}<p class="muted"><strong>Two-step sign-in is off.</strong> Confirm an email address and every sign-in will also ask for a code we send you.{% if admin.pending_email %} <strong>{{ admin.pending_email }}</strong> is waiting for its code.{% endif %}</p>{% endif %}
-{% if mail %}<form method="post" action="{{ url_for('main.account_email') }}" class="two"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="text" name="username" value="{{ admin.username }}" autocomplete="username" hidden>
-<div class="field"><label for="email">{{ 'New email address' if admin.email else 'Email address' }}</label><input type="email" id="email" name="email" autocomplete="email" maxlength="254" required></div>
-<div class="field"><label for="cur4">Current password</label><input type="password" id="cur4" name="current" autocomplete="current-password" required></div>
-<div class="field"><button class="btn" type="submit">Send a code to this address</button></div></form>
-{% else %}<p class="muted">This server is not set up to send email, so an address cannot be confirmed here. See the README, "Email".</p>{% endif %}
-{% if totp_on %}<h3>Authenticator app: on</h3><form method="post" action="{{ url_for('main.account_totp_disable') }}" class="two" data-confirm="Turn the authenticator app off? Sign-in will use emailed codes only."><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="text" name="username" value="{{ admin.username }}" autocomplete="username" hidden>
+{% if totp_on %}<p class="muted"><strong>Authenticator app: on.</strong> Every sign-in asks for the code it shows{% if admin.email %} (or one we email you){% endif %}.</p>
+<h3>Backup codes</h3>
+<p class="muted">You have <strong>{{ backups }} unused backup code{{ '' if backups == 1 else 's' }}</strong>. If you lose your phone, a backup code signs you in once without it. <strong>Keep the downloaded kit on your own computer</strong> (not only on the phone), and do not email it. Making new codes cancels every old one.</p>
+<form method="post" action="{{ url_for('main.account_backup_codes') }}" class="two"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="text" name="username" value="{{ admin.username }}" autocomplete="username" hidden>
+<div class="field"><label for="cur6">Current password</label><input type="password" id="cur6" name="current" autocomplete="current-password" required></div>
+<div class="field"><button class="btn light" type="submit">Make new backup codes</button></div></form>
+<h3>Turn the app off</h3>
+<form method="post" action="{{ url_for('main.account_totp_disable') }}" class="two" data-confirm="Turn the authenticator app off? Its backup codes stop working."><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="text" name="username" value="{{ admin.username }}" autocomplete="username" hidden>
 <div class="field"><label for="dcode">Code from the app</label><input type="text" id="dcode" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9 ]*" maxlength="7" required></div>
 <div class="field"><label for="cur5">Current password</label><input type="password" id="cur5" name="current" autocomplete="current-password" required></div>
 <div class="field"><button class="btn danger" type="submit">Turn off the authenticator app</button></div></form>
-{% elif admin.email %}<p><a class="btn light" href="{{ url_for('main.account_totp') }}">Set up an authenticator app</a></p><p class="muted">Optional. An app such as Google Authenticator, Aegis or 1Password works without email delivery. The emailed code stays available if you lose the phone.</p>{% endif %}</section>
+{% else %}<p class="muted">{% if admin.email %}<strong>Email codes are on:</strong> sign-in asks for a code we email you.{% else %}<strong>Two-step sign-in is off.</strong>{% endif %} An app such as Google Authenticator, Duo Mobile, Aegis or 1Password gives a code that needs no email or internet. You get ten backup codes to save on your computer.</p>
+<p><a class="btn light" href="{{ url_for('main.account_totp') }}">Set up an authenticator app</a></p>{% endif %}
+{% if admin.email %}<p class="muted">Email <strong>{{ admin.email }}</strong> is confirmed.</p>{% elif admin.pending_email %}<p class="muted"><strong>{{ admin.pending_email }}</strong> is waiting for its code.</p>{% endif %}
+{% if mail %}<h3>{{ 'Change the email address' if admin.email else 'Email codes (optional)' }}</h3>
+<form method="post" action="{{ url_for('main.account_email') }}" class="two"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="text" name="username" value="{{ admin.username }}" autocomplete="username" hidden>
+<div class="field"><label for="email">{{ 'New email address' if admin.email else 'Email address' }}</label><input type="email" id="email" name="email" autocomplete="email" maxlength="254" required></div>
+<div class="field"><label for="cur4">Current password</label><input type="password" id="cur4" name="current" autocomplete="current-password" required></div>
+<div class="field"><button class="btn" type="submit">Send a code to this address</button></div></form>{% endif %}</section>
 
 <section class="panel reveal"><h2>API keys</h2>
 <p class="muted">A key lets the command line or a script read this portal (read-only). Each key belongs to you, is shown once, and can be revoked. Use it with <code>ORS_SRS_API_KEY=&lt;key&gt; python app.py cli clients</code>. Do not use the secret key for this.</p>
