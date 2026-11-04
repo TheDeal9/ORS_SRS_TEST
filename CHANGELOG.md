@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.1.2: Google sign-up, no mail, no approval (2026-11-04)
+
+Administrator sign-up is open at boot and no longer needs a mail server or the owner's approval. Google proves the email; the owner's allow-list decides who may register.
+
+**Added**
+- `/admin/signup` and its link on the sign-in and landing pages exist from the first boot. **Continue with Google** (`/admin/google/start`, `/admin/google/callback`) proves the address; the new administrator then chooses an ID and password (`/admin/signup/finish`), is sent straight into the forced authenticator set-up and gets the one-time recovery kit (ten backup codes and a recovery code). Nothing opens before a valid authenticator code.
+- Settings `ORS_SRS_GOOGLE_CLIENT_ID`, `ORS_SRS_GOOGLE_CLIENT_SECRET`, `ORS_SRS_GOOGLE_ALLOWED_EMAILS` (all `sync: false` in `render.yaml`). Until all three are set the page says Google sign-up is not set up; a half-set-up server still boots and logs the missing names.
+- Table `admin_identity` (created by `db.create_all()`, no migration): one Google account, one administrator. The address is kept there, never in `Admin.email`.
+- Admins page: **Remove** an administrator who has no clients (their Google link and API keys go with them).
+
+**Removed**
+- The Brevo email-code sign-up, its 24-hour purge, the owner-approval queue (approve and reject, the nav badge, the approval and rejection mails) and the half-signed-in `verify` state. Email is now optional and only for emailed sign-in codes and confirming a new address under Account.
+
+**Fixed**
+- Two clicks on Remove at the same moment no longer end in an error page for the second one (found by a new race test).
+
+**Docs**
+- `CLAUDE.md` and `AGENTS.md` list which file holds deployment secrets and which holds local variables; `README.md` env table gains the missing names; `DEPLOY.md` section 4c explains the Google Cloud set-up.
+
 ## 0.1.1 fix: authenticator app without email (2026-11-04)
 
 The first Render deploy of 0.1.1 stopped at start with `ORS_SRS_MAIL_FROM must be a sender address` because the Blueprint switched mail on (`ORS_SRS_MAIL=brevo`) while the sender was empty. Mail is now off unless the owner turns it on, so two-step sign-in no longer depends on it.

@@ -2,16 +2,14 @@
 {% block title %}Administrators · PCOMS{% endblock %}
 {% block content %}
 <div class="heading reveal"><div><h1>Administrators</h1>
-<div class="id">Approve the people who sign up. You see how many clients each has, never who they are.</div></div></div>
+<div class="id">People sign up with Google and an email on your allow-list. You see how many clients each has, never who they are.</div></div></div>
 <section class="panel reveal"><div class="tablewrap"><table class="wrap-cells"><thead><tr><th>ID</th><th>Email</th><th>Status</th><th>Joined</th><th>Last sign-in</th><th>Clients</th><th>Action</th></tr></thead><tbody>
 {% for a, n in rows %}<tr><td>{{ a.username }}{% if a.is_owner %} <span class="chip waiting">Owner</span>{% endif %}</td>
 <td>{{ a.email or a.pending_email or '—' }}{% if not a.email and a.pending_email %} <span class="muted">(not confirmed)</span>{% endif %}</td>
-<td><span class="chip {{ {'active': 'completed', 'pending': 'in_progress'}.get(a.status, 'none') }}">{{ {'active': 'Active', 'pending': 'Waiting for approval', 'unverified': 'Email not confirmed', 'disabled': 'Disabled'}[a.status] }}</span></td>
+<td><span class="chip {{ 'completed' if a.status == 'active' else 'none' }}">{{ 'Active' if a.status == 'active' else 'Disabled' }}</span></td>
 <td>{{ a.created_at|local }}</td><td>{{ a.last_login_at|local }}</td><td class="num">{{ n }}</td>
-<td class="actions-cell">{% if a.status == 'pending' %}<form class="inline" method="post" action="{{ url_for('main.admin_action', admin_id=a.id, action='approve') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn" type="submit">Approve</button></form>
-<form class="inline" method="post" action="{{ url_for('main.admin_action', admin_id=a.id, action='reject') }}" data-confirm="Reject and remove this sign-up?"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn danger" type="submit">Reject</button></form>
-{% elif a.status == 'unverified' %}<form class="inline" method="post" action="{{ url_for('main.admin_action', admin_id=a.id, action='reject') }}" data-confirm="Remove this unconfirmed sign-up?"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn danger" type="submit">Remove</button></form>
-{% elif a.status == 'active' and not a.is_owner %}<form class="inline" method="post" action="{{ url_for('main.admin_action', admin_id=a.id, action='disable') }}" data-confirm="Disable this administrator? They are signed out at once. Their clients and data are kept."><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn danger" type="submit">Disable</button></form>
-{% elif a.status == 'disabled' %}<form class="inline" method="post" action="{{ url_for('main.admin_action', admin_id=a.id, action='enable') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn" type="submit">Enable</button></form>{% endif %}</td></tr>{% endfor %}
+<td class="actions-cell">{% if a.status == 'active' and not a.is_owner %}<form class="inline" method="post" action="{{ url_for('main.admin_action', admin_id=a.id, action='disable') }}" data-confirm="Disable this administrator? They are signed out at once. Their clients and data are kept."><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn danger" type="submit">Disable</button></form>
+{% elif a.status == 'disabled' %}<form class="inline" method="post" action="{{ url_for('main.admin_action', admin_id=a.id, action='enable') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn" type="submit">Enable</button></form>{% endif %}
+{% if not a.is_owner and n == 0 %}<form class="inline" method="post" action="{{ url_for('main.admin_action', admin_id=a.id, action='remove') }}" data-confirm="Remove this administrator? Their sign-up is deleted and the Google account can sign up again."><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn danger" type="submit">Remove</button></form>{% endif %}</td></tr>{% endfor %}
 </tbody></table></div></section>
 {% endblock %}

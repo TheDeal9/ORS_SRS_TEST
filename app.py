@@ -4,8 +4,10 @@ Clients open a one-time session link and mark the scales; scores are computed on
 the server and are only ever shown to the signed-in administrator who owns the client.
 Run `python app.py setup` once to store the login in a git-ignored .env; `hash-password` makes the hash for a host.
 """
+import base64
 import hashlib
 import hmac
+import http.client
 import io
 import json
 import os
@@ -16,6 +18,9 @@ import sys
 import threading
 import time
 import unicodedata
+import urllib.error
+import urllib.parse
+import urllib.request
 import zipfile
 from datetime import datetime, timedelta, timezone
 import operator
@@ -33,7 +38,7 @@ from flask_wtf.csrf import CSRFProtect
 from openpyxl import load_workbook
 from sqlalchemy import Numeric, and_, case, cast, event, exists, func, inspect, not_, or_, select
 from sqlalchemy.engine import Engine
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, InvalidRequestError, NoResultFound
 from sqlalchemy.orm import aliased, selectinload
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -43,7 +48,7 @@ import scoring
 import twofactor
 from charts import domains_svg, outcome_bar_svg, session_means_svg, trend_svg
 
-VERSION = '0.1.1'
+VERSION = '0.1.2'
 BASE = Path(__file__).resolve().parent
 XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 PER_PAGE = 20
@@ -154,16 +159,17 @@ class Admin(db.Model):
     recovery_hash = db.Column(db.String(64))  # SHA-256 of the recovery code; None until one is created
     created_at = db.Column(db.DateTime, nullable=False, default=utcnow)
     last_login_at = db.Column(db.DateTime)
-    # Sign-up state: unverified (email not proven) -> pending (owner has not approved) -> active <-> disabled.
-    # Only 'active' holds a session or an API key. Accounts made by setup or the command line start 'active'.
+    # active <-> disabled. Only 'active' holds a session or an API key. Every way of making an account (setup, the
+    # command line, Google sign-up) starts it 'active'; the owner can disable it. (Older databases may still hold the
+    # retired 'unverified' and 'pending' values from the mail sign-up; those accounts cannot sign in.)
     status = db.Column(db.String(12), nullable=False, default='active')
-    is_owner = db.Column(db.Boolean, nullable=False, default=False)  # the first administrator: approves the others
+    is_owner = db.Column(db.Boolean, nullable=False, default=False)  # the first administrator: manages the others
     email = db.Column(db.String(254), unique=True)  # set only once the address has been proven with a code
-    pending_email = db.Column(db.String(254))  # an address waiting for its code (sign-up, or a change of email)
+    pending_email = db.Column(db.String(254))  # an address waiting for its code (a change of email under Account)
     # One live email code per administrator (a new one replaces it). `otp_hash` is None during an authenticator-app
     # sign-in challenge, which uses the same expiry and try counter.
     otp_hash = db.Column(db.String(64))
-    otp_purpose = db.Column(db.String(8))  # 'verify' or 'login'
+    otp_purpose = db.Column(db.String(8))  # 'verify' (a new email address) or 'login'
     otp_expires_at = db.Column(db.DateTime)
     otp_tries = db.Column(db.Integer, nullable=False, default=0)
     mfa_fails = db.Column(db.Integer, nullable=False, default=0)  # wrong second-step codes since the last good sign-in
@@ -175,6 +181,7 @@ class Admin(db.Model):
     backup_hashes = db.Column(db.Text)
     clients = db.relationship('Client', back_populates='admin', order_by='Client.id')  # no cascade: deleting an admin must not delete data
     api_keys = db.relationship('ApiKey', back_populates='admin', cascade='all, delete-orphan', order_by='ApiKey.id')
+    identities = db.relationship('AdminIdentity', back_populates='admin', cascade='all, delete-orphan')
 
     @property
     def stamp(self):
@@ -194,6 +201,19 @@ class ApiKey(db.Model):
     last_used_at = db.Column(db.DateTime)
     revoked_at = db.Column(db.DateTime)
     admin = db.relationship('Admin', back_populates='api_keys')
+
+
+class AdminIdentity(db.Model):
+    """The outside account that vouched for an administrator's email at sign-up (Google). One account, one administrator.
+    The address lives here and never in Admin.email: that column switches the second step to emailed codes."""
+    __table_args__ = (db.UniqueConstraint('provider', 'subject'),)
+    id = db.Column(db.Integer, primary_key=True)
+    admin_id = db.Column(db.Integer, db.ForeignKey('admin.id', ondelete='CASCADE'), nullable=False, index=True)
+    provider = db.Column(db.String(20), nullable=False)
+    subject = db.Column(db.String(255), nullable=False)  # the provider's stable user key ("sub"), not the email
+    email = db.Column(db.String(254), nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False, default=utcnow)
+    admin = db.relationship('Admin', back_populates='identities')
 
 
 # ---------------------------------------------------------------- helpers
@@ -609,11 +629,12 @@ def email_problem(email):
     return '' if len(email) <= 254 and EMAIL_RE.match(email) else 'Enter a valid email address.'
 
 
-def create_admin(username, password, email=None, status='active'):
+def create_admin(username, password, email=None, status='active', with_code=True, identity=None):
     """Add an administrator and return (admin, recovery_code). Raises ValueError with a message fit to show.
     The first administrator ever created is the owner. An email given here waits as `pending_email` until its owner
-    proves it with a code, so a typo can never lock anyone out. A sign-up (status 'unverified') gets its recovery
-    code later, when the address is proven, so `code` is None for it."""
+    proves it with a code, so a typo can never lock anyone out. `with_code=False` mints no recovery code: the sign-up
+    that follows shows it in the one-time kit when the authenticator app is turned on. `identity` ({'provider', 'subject',
+    'email'}) is saved in the same commit, so an administrator never exists half-linked."""
     username = norm_username(username)
     if not USERNAME_RE.match(username):
         raise ValueError('The ID must be 2 to 64 characters: lower-case letters, digits, dot, dash or underscore.')
@@ -628,7 +649,9 @@ def create_admin(username, password, email=None, status='active'):
         raise ValueError('That email address already has an account.')
     admin = Admin(username=username, password_hash=generate_password_hash(password), status=status,
                   pending_email=email, is_owner=Admin.query.first() is None)
-    code = issue_recovery_code(admin) if status == 'active' else None
+    code = issue_recovery_code(admin) if status == 'active' and with_code else None
+    if identity:
+        admin.identities.append(AdminIdentity(**identity))
     db.session.add(admin)
     db.session.commit()
     return admin, code
@@ -711,7 +734,13 @@ def mail_ready():
 
 
 def signup_open():
-    return mail_ready() and current_app.config['SIGNUP_ENABLED']
+    """On at boot. The page itself says when Google is not set up yet; ORS_SRS_SIGNUP=off closes it."""
+    return current_app.config['SIGNUP_ENABLED']
+
+
+def google_ready():
+    cfg = current_app.config
+    return bool(cfg['GOOGLE_CLIENT_ID'] and cfg['GOOGLE_CLIENT_SECRET'] and cfg['GOOGLE_ALLOWED'])
 
 
 def send_mail(to, subject, body):
@@ -854,16 +883,14 @@ def set_pre(admin, purpose, method='email'):
 
 
 def pre_admin(purpose):
-    """The administrator half-way through `purpose` ('verify' or 'login') in this browser, or None."""
+    """The administrator half-way through `purpose` ('login' or 'enroll') in this browser, or None."""
     pre = session.get('pre')
     if not isinstance(pre, dict) or pre.get('purpose') != purpose or pre.get('exp', 0) < time.time():
         return None
     admin = db.session.get(Admin, pre.get('aid') or 0)
     if not admin or not secrets.compare_digest(str(pre.get('stamp', '')), admin.stamp):
         return None
-    if (purpose in ('login', 'enroll') and admin.status != 'active') or (purpose == 'verify' and admin.status not in ('unverified', 'active')):
-        return None
-    return admin
+    return admin if admin.status == 'active' else None
 
 
 def start_session(admin):
@@ -995,15 +1022,7 @@ def admin_login():
         admin = authenticate(request.form.get('username', ''), request.form.get('password', ''))
         if admin:
             # Only a correct password reveals what state the account is in, so IDs cannot be probed through these.
-            if admin.status == 'unverified':
-                if admin.pending_email and mail_ready():
-                    send_otp(admin, 'verify', admin.pending_email)
-                    set_pre(admin, 'verify')
-                    return redirect(url_for('main.admin_verify'))
-                flash('This sign-up was never confirmed. Please sign up again.')
-            elif admin.status == 'pending':
-                flash('Your email is confirmed, but the portal owner has not approved your account yet. You will get an email when they do.')
-            elif admin.status == 'disabled':
+            if admin.status != 'active':  # only 'disabled' is possible now; anything else gets no way in either
                 flash('This account is disabled. Ask the portal owner.')
             else:
                 method = second_step_method(admin)
@@ -1131,48 +1150,150 @@ def admin_2fa_setup():
     return page
 
 
-# ---------------------------------------------------------------- admin sign-up, email proof, owner approval
+# ---------------------------------------------------------------- admin sign-up: Google proves the email
 
-def purge_unverified():
-    """Drop sign-ups that never proved their email within a day, which frees the IDs and addresses they held."""
-    Admin.query.filter(Admin.status == 'unverified', Admin.created_at < utcnow() - timedelta(hours=24)).delete(synchronize_session=False)
-    db.session.commit()
+GOOGLE_ISSUERS = ('https://accounts.google.com', 'accounts.google.com')
+PROOF_TTL = 600  # seconds to come back from Google, and to choose an ID and password afterwards
 
 
-@bp.route('/admin/signup', methods=['GET', 'POST'])
-@limiter.limit('5 per minute; 20 per day', methods=['POST'])
+class GoogleError(Exception):
+    """Anything that stops a Google sign-up. The message names the cause only, never a token, code or address."""
+
+
+def google_exchange(code, redirect_uri):
+    """Trade the one-time code for Google's answer (JSON bytes). The secret goes only in this request body, over TLS."""
+    cfg = current_app.config
+    body = urllib.parse.urlencode({'code': code, 'client_id': cfg['GOOGLE_CLIENT_ID'], 'client_secret': cfg['GOOGLE_CLIENT_SECRET'],
+                                   'redirect_uri': redirect_uri, 'grant_type': 'authorization_code'}).encode()
+    request_ = urllib.request.Request(cfg['GOOGLE_TOKEN_URL'], data=body, headers={
+        'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json'})
+    try:
+        with urllib.request.urlopen(request_, timeout=cfg['GOOGLE_TIMEOUT']) as reply:
+            return reply.read(64 * 1024)
+    except (OSError, http.client.HTTPException) as exc:  # URLError, HTTPError and timeouts are all OSError
+        raise GoogleError(type(exc).__name__) from None
+
+
+def google_claims(reply, client_id, nonce):
+    """The (subject, email) Google vouches for, or GoogleError. The id token comes straight from Google's token endpoint over
+    TLS with our client secret, so OpenID Connect Core 3.1.3.7 lets that stand in for re-checking its signature; every claim
+    is still checked here."""
+    try:
+        payload = json.loads(reply)['id_token'].split('.')[1]
+        claims = json.loads(base64.urlsafe_b64decode(payload + '=' * (-len(payload) % 4)))
+    except (ValueError, KeyError, IndexError, TypeError, AttributeError):  # a bad base64 string is a ValueError too
+        raise GoogleError('unreadable reply') from None
+    if not isinstance(claims, dict):
+        raise GoogleError('unreadable reply')
+    exp = claims.get('exp')
+    if claims.get('iss') not in GOOGLE_ISSUERS:
+        raise GoogleError('issuer')
+    if claims.get('aud') != client_id:
+        raise GoogleError('audience')
+    if not isinstance(exp, (int, float)) or exp <= time.time():
+        raise GoogleError('expired')
+    if not secrets.compare_digest(str(claims.get('nonce', '')).encode(), nonce.encode()):
+        raise GoogleError('nonce')
+    subject, email, verified = str(claims.get('sub') or ''), norm_email(claims.get('email')), claims.get('email_verified')
+    if not subject or not email or not (verified is True or verified == 'true'):
+        raise GoogleError('email not verified')
+    return subject, email
+
+
+def google_proof():
+    """What the callback stored once Google vouched for an allowed email, or None when absent or too old."""
+    proof = session.get('gsignup')
+    return proof if isinstance(proof, dict) and proof.get('exp', 0) > time.time() else None
+
+
+@bp.get('/admin/signup')
 def admin_signup():
     if not signup_open():
-        return render_template('signup.html', closed=True, form={}), 404
-    form = {'username': request.form.get('username', '').strip(), 'email': request.form.get('email', '').strip()}
+        return render_template('signup.html', mode='closed'), 404
+    return render_template('signup.html', mode='start' if google_ready() else 'unready')
+
+
+@bp.get('/admin/google/start')
+@limiter.limit('10 per minute')
+def admin_google_start():
+    if not (signup_open() and google_ready()):
+        return redirect(url_for('main.admin_signup'))
+    cfg = current_app.config
+    state, nonce = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
+    session['gstate'] = {'state': state, 'nonce': nonce, 'exp': int(time.time()) + PROOF_TTL}
+    query = urllib.parse.urlencode({'client_id': cfg['GOOGLE_CLIENT_ID'], 'redirect_uri': url_for('main.admin_google_callback', _external=True),
+                                    'response_type': 'code', 'scope': 'openid email', 'state': state, 'nonce': nonce,
+                                    'prompt': 'select_account'})
+    return redirect(f"{cfg['GOOGLE_AUTH_URL']}?{query}")
+
+
+@bp.get('/admin/google/callback')
+@limiter.limit('10 per minute')
+def admin_google_callback():
+    def refuse(message, cause, where='main.admin_signup'):
+        current_app.logger.warning('Google sign-up refused: %s', cause)  # the cause only: never a code, token or address
+        flash(message)
+        return redirect(url_for(where))
+
+    if not (signup_open() and google_ready()):
+        return redirect(url_for('main.admin_signup'))
+    cfg = current_app.config
+    started = session.pop('gstate', None)  # used up by this attempt, right or wrong: a state is never replayed
+    failed = 'Google sign-in did not work. Please try again.'
+    if request.args.get('error'):
+        return refuse('Google sign-in was cancelled.', 'cancelled')
+    if (not isinstance(started, dict) or started.get('exp', 0) <= time.time()
+            or not secrets.compare_digest(request.args.get('state', '').encode(), str(started.get('state', '')).encode())):
+        return refuse(failed, 'state')
+    if not request.args.get('code'):
+        return refuse(failed, 'no code')
+    try:
+        subject, email = google_claims(google_exchange(request.args['code'], url_for('main.admin_google_callback', _external=True)),
+                                       cfg['GOOGLE_CLIENT_ID'], started['nonce'])
+    except GoogleError as exc:
+        return refuse(failed, exc)
+    if AdminIdentity.query.filter_by(provider='google', subject=subject).first():
+        return refuse('This Google account already has an account. Sign in with your ID and password.', 'known account', 'main.admin_login')
+    if email not in cfg['GOOGLE_ALLOWED']:
+        return refuse('This Google account is not on the list for this portal. Ask the portal owner.', 'not on the list')
+    session['gsignup'] = {'sub': subject, 'email': email, 'exp': int(time.time()) + PROOF_TTL}
+    return redirect(url_for('main.admin_signup_finish'))
+
+
+@bp.route('/admin/signup/finish', methods=['GET', 'POST'])
+@limiter.limit('5 per minute; 20 per day', methods=['POST'])
+def admin_signup_finish():
+    """Google has vouched for the email; the new administrator now chooses an ID and password like everyone else. The account
+    is made active with no recovery code, then goes straight to the forced authenticator set-up, whose one-time kit holds the
+    backup codes and the recovery code. No owner approval: the allow-list was the gate."""
+    proof = google_proof() if signup_open() else None
+    if not proof:
+        session.pop('gsignup', None)
+        return redirect(url_for('main.admin_signup'))
+    form = {'username': request.form.get('username', '').strip()}
     if request.method == 'POST':
-        purge_unverified()
         password = request.form.get('password', '')
         try:
             if password_problem(password, request.form.get('confirm', '')):
                 raise ValueError(password_problem(password, request.form.get('confirm', '')))
-            if not norm_email(form['email']):
-                raise ValueError('Enter your email address: the portal sends a code to it.')
-            admin, _ = create_admin(form['username'], password, form['email'], status='unverified')
+            admin, _ = create_admin(form['username'], password, status='active', with_code=False,
+                                    identity={'provider': 'google', 'subject': proof['sub'], 'email': proof['email']})
         except ValueError as exc:
             flash(str(exc))
-        except IntegrityError:  # two sign-ups with the same ID at the same moment
+        except IntegrityError:  # the same ID, or the same Google account, finished at the same moment
             db.session.rollback()
-            flash('That ID was just taken. Please choose another.')
+            flash('That ID or Google account was just taken. Please try again with another ID, or sign in.')
         else:
-            sent = send_otp(admin, 'verify', admin.pending_email)
-            set_pre(admin, 'verify')  # clears the session, so any message must be flashed after it
-            if sent == 'failed':
-                flash('We could not email the code. Use "Send a new code" in a minute.')
-            return redirect(url_for('main.admin_verify'))
-    return render_template('signup.html', closed=False, form=form)
+            set_pre(admin, 'enroll', 'totp')  # clears the session, proof included; nothing opens until the app code is entered
+            return redirect(url_for('main.admin_2fa_setup'))
+    return render_template('signup_finish.html', form=form, email=mask_email(proof['email']))
 
 
 @bp.route('/admin/verify', methods=['GET', 'POST'])
 @limiter.limit('5 per minute', methods=['POST'])
 def admin_verify():
-    """Enter the emailed code to prove an address: at sign-up, or after changing the email under Account."""
-    admin = pre_admin('verify') or current_admin()
+    """Enter the emailed code to prove a new email address, after asking for it under Account."""
+    admin = current_admin()
     if not admin or not admin.pending_email:
         return redirect(url_for('main.admin_login'))
     if request.method == 'POST':
@@ -1181,13 +1302,13 @@ def admin_verify():
             return complete_verification(admin)
         db.session.commit()
         flash('That code is not right or has expired.')
-    return render_template('verify.html', email=mask_email(admin.pending_email), signed_in=bool(current_admin()))
+    return render_template('verify.html', email=mask_email(admin.pending_email))
 
 
 @bp.post('/admin/verify/resend')
 @limiter.limit('5 per minute')
 def admin_verify_resend():
-    admin = pre_admin('verify') or current_admin()
+    admin = current_admin()
     if not admin or not admin.pending_email:
         return redirect(url_for('main.admin_login'))
     lock_admin(admin)
@@ -1200,10 +1321,6 @@ def admin_verify_resend():
 def complete_verification(admin):
     new, old = admin.pending_email, admin.email
     admin.email, admin.pending_email = new, None
-    first_time = admin.status == 'unverified'
-    if first_time:
-        admin.status = 'pending'
-    code = issue_recovery_code(admin) if first_time else None
     try:
         db.session.commit()
     except IntegrityError:  # someone proved the same address first
@@ -1212,17 +1329,7 @@ def complete_verification(admin):
         admin.pending_email = None
         db.session.commit()
         flash('That email address already has an account.')
-        return redirect(url_for('main.account' if current_admin() else 'main.admin_signup'))
-    if first_time:
-        session.clear()
-        for owner in Admin.query.filter(Admin.is_owner.is_(True), Admin.status == 'active', Admin.email.isnot(None)):
-            try:
-                send_mail(owner.email, 'New administrator waiting for approval',
-                          f'"{admin.username}" has signed up and confirmed their email address. '
-                          f'Approve or reject them on the Admins page of the portal.')
-            except mailer.MailError:
-                pass  # the Admins page still shows them
-        return render_template('recovery_done.html', code=code, pending=True)
+        return redirect(url_for('main.account'))
     if old and old != new:
         try:
             send_mail(old, 'Your ORS/SRS portal email address was changed',
@@ -1239,38 +1346,31 @@ def complete_verification(admin):
 def admins():
     rows = db.session.execute(
         select(Admin, func.count(Client.id)).outerjoin(Client, Client.admin_id == Admin.id).group_by(Admin.id)
-        .order_by(case((Admin.status == 'pending', 0), else_=1), Admin.id)).all()
+        .order_by(Admin.id)).all()
     return render_template('admins.html', rows=rows)
 
 
-@bp.post('/admin/admins/<int:admin_id>/<any(approve,reject,disable,enable):action>')
+@bp.post('/admin/admins/<int:admin_id>/<any(disable,enable,remove):action>')
 @owner_required
 def admin_action(admin_id, action):
-    target = lock_admin(db.get_or_404(Admin, admin_id))  # two owners (or two clicks) cannot both approve and both send mail
-    allowed = {'approve': ('pending',), 'reject': ('pending', 'unverified'), 'disable': ('active',), 'enable': ('disabled',)}[action]
+    try:
+        target = lock_admin(db.get_or_404(Admin, admin_id))  # two owners (or two clicks) cannot both act on the same account
+    except (NoResultFound, InvalidRequestError):  # removed by another click while this one waited for the lock
+        abort(404)
+    allowed = {'disable': ('active',), 'enable': ('disabled',), 'remove': ('active', 'disabled')}[action]
     if target.status not in allowed or target.is_owner or target.id == g.admin.id:
         flash('That is not possible for this account.')
         return redirect(url_for('main.admins'))
-    name, email, notice = target.username, target.email, None  # only a proven address is ever mailed: a stranger's must not get our notices
-    if action == 'reject':
+    name = target.username
+    if action == 'remove':
         if target.clients:  # never delete someone who holds client data
             flash('That administrator has clients, so they cannot be removed. Disable them instead.')
             return redirect(url_for('main.admins'))
-        db.session.delete(target)
-        notice = ('Your ORS/SRS portal sign-up was not approved', 'The portal owner did not approve your administrator sign-up.')
+        db.session.delete(target)  # their Google link and API keys go with them, which frees the ID and the Google account
     else:
-        target.status = {'approve': 'active', 'disable': 'disabled', 'enable': 'active'}[action]
-        if action == 'approve':
-            notice = ('Your ORS/SRS portal account is approved',
-                      f'The portal owner approved your account. Sign in at {url_for("main.admin_login", _external=True)} '
-                      f'with the ID "{name}" and a code we email you.')
+        target.status = {'disable': 'disabled', 'enable': 'active'}[action]
     db.session.commit()
-    flash(f'{name}: {action}d.' if action != 'reject' else f'{name}: removed.')
-    if notice and email and mail_ready():
-        try:
-            send_mail(email, *notice)
-        except mailer.MailError:
-            flash('The notice email could not be sent.')
+    flash(f'{name}: removed.' if action == 'remove' else f'{name}: {action}d.')
     return redirect(url_for('main.admins'))
 
 
@@ -1899,10 +1999,23 @@ def create_app(config=None):
         SMTP_SECURITY=env('ORS_SRS_SMTP_SECURITY', 'starttls'),
         BREVO_API_KEY=env('ORS_SRS_BREVO_API_KEY', ''),
         REQUIRE_2FA=env('ORS_SRS_REQUIRE_2FA', 'on').lower() != 'off',  # on: an admin with no second step must set up the app to get in
-        SIGNUP_ENABLED=env('ORS_SRS_SIGNUP', 'on').lower() != 'off',  # lets the owner close sign-up without touching mail
+        SIGNUP_ENABLED=env('ORS_SRS_SIGNUP', 'on').lower() != 'off',  # lets the owner close sign-up
+        # Sign-up: Google proves the email, the allow-list says who may register (no approval step). The two URLs are not read
+        # from the environment, so a stray variable cannot send the client secret elsewhere; tests point them at a stub.
+        GOOGLE_CLIENT_ID=env('ORS_SRS_GOOGLE_CLIENT_ID', ''),
+        GOOGLE_CLIENT_SECRET=env('ORS_SRS_GOOGLE_CLIENT_SECRET', ''),
+        GOOGLE_ALLOWED=frozenset(e for e in map(norm_email, env('ORS_SRS_GOOGLE_ALLOWED_EMAILS', '').split(',')) if e),
+        GOOGLE_AUTH_URL='https://accounts.google.com/o/oauth2/v2/auth',
+        GOOGLE_TOKEN_URL='https://oauth2.googleapis.com/token',
+        GOOGLE_TIMEOUT=10,
     )
     if config:
         app.config.update(config)
+    google_names = {'GOOGLE_CLIENT_ID': 'ORS_SRS_GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET': 'ORS_SRS_GOOGLE_CLIENT_SECRET',
+                    'GOOGLE_ALLOWED': 'ORS_SRS_GOOGLE_ALLOWED_EMAILS'}
+    google_missing = [name for key, name in google_names.items() if not app.config[key]]
+    if 0 < len(google_missing) < len(google_names):  # half set up: say so, but never stop the portal (clients use it too)
+        app.logger.warning('Google sign-up is not set up; missing: %s.', ', '.join(google_missing))
     if len(app.config['SECRET_KEY'] or '') < 16:
         raise RuntimeError('ORS_SRS_SECRET_KEY must be set to a random string of at least 16 characters.')
     mailer.check_config(app.config, dev=env('ORS_SRS_ENV') == 'dev')
@@ -1920,14 +2033,6 @@ def create_app(config=None):
     def filter_url(active, drop=None, **extra):
         """Clients-page URL with the active filters, minus `drop`, plus `extra` (for example page=2)."""
         return url_for('main.dashboard', **{**{k: v for k, v in active.items() if k != drop}, **extra})
-
-    @app.context_processor
-    def nav_extras():
-        """The owner's nav shows how many sign-ups wait for approval."""
-        admin = getattr(g, 'admin', None)
-        if admin and admin.is_owner:
-            return {'pending_admins': Admin.query.filter_by(status='pending').count()}
-        return {}
 
     @app.template_filter('local')
     def local(dt):

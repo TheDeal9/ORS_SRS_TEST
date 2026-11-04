@@ -171,17 +171,6 @@ def test_simultaneous_new_link_clicks_leave_exactly_one_live_link(app, owner):
         assert len({l.token_hash for l in links}) == 8
 
 
-def test_simultaneous_sign_ups_with_one_id_make_one_account_and_no_error(app):
-    def join(i):
-        c = app.test_client()
-        return c.post('/admin/signup', data=dict(username='dr-race', email=f'race{i}@example.test', password=PASSWORD, confirm=PASSWORD))
-    responses = race(6, join)
-    assert codes(responses).count(302) == 1 and set(codes(responses)) <= {200, 302}
-    with app.app_context():
-        assert Admin.query.filter_by(username='dr-race').count() == 1
-        assert len([m for m in app.config['MAIL_OUTBOX']]) == 1  # only the winner was mailed a code
-
-
 def test_simultaneous_wrong_codes_cannot_exceed_the_five_tries(app):
     make_user(app, 'doc', email='doc@example.test')
     c = app.test_client()
@@ -268,20 +257,17 @@ def test_one_authenticator_code_sent_twice_at_once_signs_in_once(app):
     assert sum(1 for c in browsers if c.get('/admin').status_code == 200) == 1
 
 
-def test_a_waiting_applicant_approved_twice_at_once_is_mailed_once(app):
-    from test_signup import register
-    register(app)
-    owner = sign_in(app, 'admin')
+def test_an_admin_removed_by_four_clicks_at_once_is_removed_once_without_an_error(app):
+    make_user(app, 'dr-new')
     with app.app_context():
         target = Admin.query.filter_by(username='dr-new').one().id
-    before = len(app.config['MAIL_OUTBOX'])
-    race(4, lambda i: _approve(app, target))
-    assert len(app.config['MAIL_OUTBOX']) - before == 1
+    responses = race(4, lambda i: _remove(app, target))
+    assert set(codes(responses)) <= {302, 404} and codes(responses).count(302) >= 1
     with app.app_context():
-        assert db.session.get(Admin, target).status == 'active'
+        assert db.session.get(Admin, target) is None
 
 
-def _approve(app, target):
+def _remove(app, target):
     c = app.test_client()
     c.post('/admin/login', data={'username': 'admin', 'password': PASSWORD})
-    return c.post(f'/admin/admins/{target}/approve')
+    return c.post(f'/admin/admins/{target}/remove')

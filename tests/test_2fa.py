@@ -163,11 +163,16 @@ def test_a_forged_or_foreign_pre_cannot_finish_someone_elses_sign_in(app, doc):
     assert c.get('/admin/2fa').status_code == 302
 
 
-def test_pre_for_verifying_cannot_be_used_at_the_login_step(app):
+@pytest.mark.parametrize('purpose', ['verify', 'enroll', 'anything'])
+def test_a_half_signed_in_state_made_for_another_purpose_cannot_be_used_at_the_login_step(app, purpose):
     c = app.test_client()
-    c.post('/admin/signup', data=dict(username='dr-new', email='n@example.test', password=PASSWORD, confirm=PASSWORD))
+    with app.app_context():
+        a = Admin.query.filter_by(username='admin').one()
+        pre = {'aid': a.id, 'stamp': a.stamp, 'purpose': purpose, 'method': 'email', 'exp': int(time.time()) + 600}
+    with c.session_transaction() as s:
+        s['pre'] = pre
     assert c.get('/admin/2fa').status_code == 302
-    assert c.post('/admin/2fa', data={'code': last_code(app, 'n@example.test')}).status_code == 302
+    assert c.post('/admin/2fa', data={'code': '123456'}).status_code == 302
     assert c.get('/admin').status_code == 302
 
 

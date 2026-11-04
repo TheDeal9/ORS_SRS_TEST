@@ -2,7 +2,7 @@
 
 A practitioner adds a client, sends a **one-time session link**, and the client marks the ORS and SRS lines. Scores are computed on the server and are only ever visible to the signed-in administrator, inside the portal: client list with filters, per-client history, trend charts with tooltips, reference flags, per-assessment detail and an in-portal report viewer. Excel is an optional download.
 
-Version 0.1.1 adds administrator **sign-up** (email-confirmed, owner-approved), **per-administrator data** (each admin sees only their own clients and reports), a **second sign-in step** (authenticator app with downloadable backup codes; emailed code optional), real concurrent-write protection and a **Caseload** page. See [CHANGELOG.md](CHANGELOG.md). Phases 0 to 3 are done (hardening, database, in-portal view, strict security policy). Deployment steps are in [DEPLOY.md](DEPLOY.md). Tests are explained in [TESTING.md](TESTING.md). Project context for contributors and AI agents: [AGENTS.md](AGENTS.md) and [CLAUDE.md](CLAUDE.md).
+Version 0.1.2 opens administrator **sign-up** at boot with **Google** proving the email (no mail server, no approval; the owner's allow-list decides who may register). Version 0.1.1 added **per-administrator data** (each admin sees only their own clients and reports), a **second sign-in step** (authenticator app with downloadable backup codes; emailed code optional), real concurrent-write protection and a **Caseload** page. See [CHANGELOG.md](CHANGELOG.md). Phases 0 to 3 are done (hardening, database, in-portal view, strict security policy). Deployment steps are in [DEPLOY.md](DEPLOY.md). Tests are explained in [TESTING.md](TESTING.md). Project context for contributors and AI agents: [AGENTS.md](AGENTS.md) and [CLAUDE.md](CLAUDE.md).
 
 ## Run locally
 
@@ -17,7 +17,7 @@ python app.py setup                # asks for an administrator ID and password, 
 python app.py                      # http://127.0.0.1:5000/admin/login
 ```
 
-The app refuses to start without `ORS_SRS_SECRET_KEY` (16+ characters) and at least one administrator. There is no default password. Each administrator sees only their own clients; the first administrator created is the **owner** and approves the others.
+The app refuses to start without `ORS_SRS_SECRET_KEY` (16+ characters) and at least one administrator. There is no default password. Each administrator sees only their own clients; the first administrator created is the **owner** and can disable, enable or remove the others.
 
 ### How sign-in works
 
@@ -27,27 +27,26 @@ The app refuses to start without `ORS_SRS_SECRET_KEY` (16+ characters) and at le
 - The session cookie carries the admin's id plus a stamp derived from the password hash. Changing the password signs every other browser out, and knowing `ORS_SRS_SECRET_KEY` alone is not enough to forge a session.
 - `.env` is git-ignored, created readable by you only, and read only when you start with `python app.py` (not by tests or gunicorn). A variable already set in your shell or on a host wins over the file.
 - On a host such as Render there is no `.env`: run `python app.py hash-password`, put the hash in `ORS_SRS_ADMIN_PASSWORD_HASH` (and the ID in `ORS_SRS_ADMIN_USERNAME`). They are used **once**, on the first start, to create the first administrator. After that the database is the source of truth and those two variables are ignored; change the password in the portal.
-- The first prototype's `ORS_SRS_ADMIN_PASSWORD` is no longer read by anything.
 
-### Signing up, approval and two-step sign-in (v0.1.1)
+### Signing up and two-step sign-in
 
-- **Sign up:** when email is set up (see "Email" below) the sign-in page offers *Create an administrator account*: ID, email, password. A six-digit code is emailed to confirm the address, then the account waits for the **owner** to approve it on the **Admins** page (the owner is emailed, and so is the applicant when approved or rejected). Unconfirmed sign-ups are removed after a day.
-- **Your own clients only:** every client, assessment, report, export, API result and the Caseload page belong to one administrator. Another admin's pages are simply "not found". The owner can approve, disable and enable administrators, and sees how many clients each has, never who they are. Client IDs are unique per administrator.
+- **Sign up:** the sign-in page always offers *Create an administrator account*. **Continue with Google** proves the email address (no mail server needed). Only Google addresses on the owner's allow-list (`ORS_SRS_GOOGLE_ALLOWED_EMAILS`) can register; there is no approval step. The new administrator then chooses an ID and a password, is sent straight to the authenticator-app set-up (nothing else opens until it is on) and receives the one-time recovery kit with ten backup codes and a recovery code. Until the three `ORS_SRS_GOOGLE_*` settings exist the page says sign-up is not set up yet. Set-up steps: `DEPLOY.md`, "Google sign-up".
+- **Your own clients only:** every client, assessment, report, export, API result and the Caseload page belong to one administrator. Another admin's pages are simply "not found". The owner can disable, enable and remove (when they have no clients) administrators, and sees how many clients each has, never who they are. Client IDs are unique per administrator.
 - **Second step:** every administrator signs in with the password and then a code from an **authenticator app** (Google Authenticator, Duo Mobile, Aegis, 1Password and others). No email or mail server is needed. An administrator with no second step is sent to a set-up page right after the password (nothing else opens until the app is on), and on turning it on gets a **recovery kit**: ten one-time **backup codes** (each signs in once, in place of the app code, if the phone is lost; the password is still needed) plus a password recovery code if there was none. The kit is shown once with a **Download recovery kit** button: **save the file on your own computer** (or a password manager), do not email it and do not keep it only on the phone. **Account** shows how many codes are left and makes a new set (the old set stops working). Ten wrong codes in a row lock the second step for 15 minutes. If mail is set up, an address can also be confirmed under Account and an emailed six-digit code then works as the second step instead. `ORS_SRS_REQUIRE_2FA=off` lets an administrator with no second step sign in with the password alone (default: on).
 - **Lost the phone and the backup codes?** On the computer that runs the app: `python app.py reset-2fa <id>` removes the authenticator app, its backup codes and any email. The person signs in with the password and sets the app up again.
 
 ### Email
 
-Codes and notices are plain text, with no links. Choose a backend with `ORS_SRS_MAIL`:
+Email is optional. It is used only for **emailed sign-in codes** (a second step for an administrator who adds a confirmed address under Account) and plain notices; sign-up does not need it. Messages are plain text. Choose a backend with `ORS_SRS_MAIL`:
 
 | Value | Use |
 |---|---|
-| unset | No sign-up and no emailed codes. Administrators without an email are unaffected; one who already has an email cannot sign in while mail is off. |
+| unset | No emailed codes. Sign-up still works (Google). Administrators without an email are unaffected; one who already has an email cannot sign in while mail is off. |
 | `brevo` | Brevo's HTTPS API (free 300 mails a day). **Use this on Render's free plan, which blocks SMTP ports.** Needs `ORS_SRS_MAIL_FROM` (a sender you verified in Brevo) and `ORS_SRS_BREVO_API_KEY`. |
 | `smtp` | Any SMTP relay (local, or a paid host). `ORS_SRS_SMTP_HOST`, `_PORT` (587 or 465), `_USER`, `_PASSWORD`, `_SECURITY` (`starttls` default, `ssl`, `none` only without a password), plus `ORS_SRS_MAIL_FROM`. |
 | `console` | Local development only (`ORS_SRS_ENV=dev`): prints each message, code included, in the terminal. |
 
-`ORS_SRS_SIGNUP=off` closes sign-up without touching mail.
+`ORS_SRS_SIGNUP=off` closes administrator sign-up.
 
 ### Forgot your password
 
@@ -81,10 +80,13 @@ Other commands: `python app.py admins` (list administrators: status, owner, seco
 | `ORS_SRS_API_KEY`, `ORS_SRS_URL` | for `python app.py cli` | Your API key and the portal address. |
 | `ORS_SRS_MAIL`, `ORS_SRS_MAIL_FROM` | no | Email backend and sender for codes and notices; see "Email". |
 | `ORS_SRS_BREVO_API_KEY` | with `brevo` | Brevo API key (kept in the host's settings, never in the repo). |
-| `ORS_SRS_SMTP_HOST`, `_PORT`, `_USER`, `_PASSWORD`, `_SECURITY` | with `smtp` | SMTP relay settings. |
-| `ORS_SRS_SIGNUP` | no | `off` closes administrator sign-up. |
+| `ORS_SRS_SMTP_HOST`, `ORS_SRS_SMTP_PORT`, `ORS_SRS_SMTP_USER`, `ORS_SRS_SMTP_PASSWORD`, `ORS_SRS_SMTP_SECURITY` | with `smtp` | SMTP relay settings. |
+| `ORS_SRS_SIGNUP` | no | `off` closes administrator sign-up. Default on. |
+| `ORS_SRS_GOOGLE_CLIENT_ID`, `ORS_SRS_GOOGLE_CLIENT_SECRET` | for sign-up | The Google OAuth client (type Web application). Keep the secret in the host's settings only. |
+| `ORS_SRS_GOOGLE_ALLOWED_EMAILS` | for sign-up | Comma-separated Google addresses allowed to sign up as administrators. Empty = nobody can. |
 | `ORS_SRS_REQUIRE_2FA` | no | Default on: an administrator with no second step must set up the authenticator app at sign-in. `off` lets the password alone in (local development only). |
 | `DATABASE_URL` | no | Default: SQLite at `data/app.db`. `postgres://` and `postgresql://` URLs are accepted. |
+| `DATABASE_URL_UNPOOLED` | no | Neon's direct connection string. When set it wins over `DATABASE_URL` (Neon advises DDL over the direct string). Used locally from `.env.local` by Neon tooling; the app itself reads only real environment variables and `.env`. |
 | `ORS_SRS_TIMEZONE` | no | Default `UTC`. Set your own (for example `Asia/Kolkata`) so assessment dates and times follow your calendar day. |
 | `ORS_SRS_ENV` | no | `dev` turns off the Secure cookie flag so http://localhost works. |
 | `ORS_SRS_PROXY_HOPS` | no | Number of reverse proxies in front of the app (default 0). Set `1` on Render so links use `https` and the login limit sees real visitor addresses. |

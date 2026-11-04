@@ -50,7 +50,7 @@ Choose the administrator ID you want (for example `bhargav`). You do not need to
 ## 4. Create the service on Render (Blueprint)
 
 1. dashboard.render.com, **New**, **Blueprint**, connect the repository, branch `main`.
-2. Render reads `render.yaml` and shows one service, `ors-srs-portal`: Python, **Free**, **Singapore**. Everything below is already filled in. It asks for five values (the last two only if you want sign-up and emailed codes, so leave them blank for now; see section 4c):
+2. Render reads `render.yaml` and shows one service, `ors-srs-portal`: Python, **Free**, **Singapore**. Everything below is already filled in. It asks for the values below. The two mail ones are optional (section 4d) and the three Google ones turn on administrator sign-up (section 4c); leave any of them blank for now and the portal still starts:
 
    | Render asks for | Enter |
    |---|---|
@@ -58,7 +58,9 @@ Choose the administrator ID you want (for example `bhargav`). You do not need to
    | `ORS_SRS_ADMIN_USERNAME` | your administrator ID, for example `bhargav` |
    | `ORS_SRS_ADMIN_PASSWORD_HASH` | the whole `scrypt:...` line from step 3, pasted in the dashboard (it does not expand `$`) |
    | `ORS_SRS_MAIL_FROM` | the sender address you verified in Brevo, for example `ORS SRS Portal <you@example.com>` |
-   | `ORS_SRS_BREVO_API_KEY` | the Brevo API key from section 4c |
+   | `ORS_SRS_BREVO_API_KEY` | the Brevo API key from section 4d |
+   | `ORS_SRS_GOOGLE_CLIENT_ID`, `ORS_SRS_GOOGLE_CLIENT_SECRET` | from section 4c |
+   | `ORS_SRS_GOOGLE_ALLOWED_EMAILS` | the Google addresses allowed to sign up, comma-separated, from section 4c |
 
 3. Click **Apply**. The first build takes a few minutes. Your address is `https://ors-srs-portal.onrender.com` (or similar; shown on the service page).
 
@@ -95,15 +97,30 @@ The first time you sign in (the first administrator on a fresh database, or any 
 
 `ORS_SRS_REQUIRE_2FA=off` in Render's Environment tab lets an administrator with no second step in with the password alone; leave it unset. Do not change `ORS_SRS_SECRET_KEY` afterwards: stored app secrets and backup codes are tied to it, and an account that has only the app is then refused until you run `reset-2fa` (it is never let in on the password alone).
 
-## 4c. Email: one-time codes and sign-up (Brevo, free; optional)
+## 4c. Google sign-up for administrators
 
-Email is **optional** and **off by default**: the Blueprint does not set `ORS_SRS_MAIL`. Without it there is no sign-up page and no emailed codes; the authenticator app above works fine. Set it up only when you want other practitioners to sign up. The portal then emails six-digit codes (sign-up confirmation and sign-in) and a few notices. It sends no links and no client data. Render's free web service cannot use SMTP, so use Brevo's HTTPS API. Brevo needs a verified sender; a domain you own with its DKIM and SPF records gives reliable delivery, and a free-mail address (Gmail, Yahoo) as the sender is rewritten by Brevo and often lands in spam.
+The sign-in page always shows *Create an administrator account*. Until the three Google settings exist it says "Google sign-up is not set up on this portal yet". Once they exist a practitioner clicks **Continue with Google**, Google proves their email, they choose an ID and password, set up the authenticator app and save the recovery kit. **There is no approval step: the allow-list is the gate**, so only the addresses you list can register.
+
+One-time set-up by the owner (menu names in Google Cloud change; Google's help page "Setting up OAuth 2.0" shows the current ones):
+
+1. console.cloud.google.com: create a project (any name).
+2. **OAuth consent screen**: type **External**. Add the scopes `openid` and `email` (these are not "sensitive", so no Google review is needed). While the screen is in **Testing**, Google only lets the listed *test users* through: add your own address and the two or three practitioners. (Check the console for the current test-user limit and how long a Testing consent lasts; both are Google's to change.)
+3. **Credentials → Create credentials → OAuth client ID**, application type **Web application**. Under **Authorised redirect URIs** add exactly `https://ors-srs-portal.onrender.com/admin/google/callback` (your Render address plus `/admin/google/callback`; scheme and trailing slash must match, no wildcards).
+4. Copy the **client ID** and **client secret**. In Render's Environment tab set `ORS_SRS_GOOGLE_CLIENT_ID`, `ORS_SRS_GOOGLE_CLIENT_SECRET` and `ORS_SRS_GOOGLE_ALLOWED_EMAILS` (the addresses exactly as Google shows them, comma-separated), then **Save, rebuild and deploy**.
+5. For testing on your own computer make a **second, separate** OAuth client with the redirect `http://127.0.0.1:5000/admin/google/callback` and put its three values in `.env` with `ORS_SRS_ENV=dev`. Never copy the production secret into a file on your computer.
+
+What the portal does with Google: it sends the browser to `accounts.google.com`, then swaps the one-time code at Google's token endpoint from the server. It keeps only Google's account id and the verified email address; no client data is sent to Google. Adding or removing an address on the list only changes who can **sign up**; to take someone's access away use **Disable** or **Remove** on the Admins page. `ORS_SRS_SIGNUP=off` closes sign-up entirely.
+
+Check it works (from your phone): open `/admin/signup`, **Continue with Google**, pick an allowed account, choose an ID and password, scan the QR code, enter the code, **download the recovery kit**, sign out, sign in with ID + password + code. Then disable or remove the test account on the **Admins** page.
+
+## 4d. Email: one-time sign-in codes (Brevo, free; optional)
+
+Email is **optional** and **off by default**: the Blueprint does not set `ORS_SRS_MAIL`. Without it there are no emailed codes; the authenticator app above works fine, and **sign-up does not need mail** (section 4c). Set it up only when an administrator wants an emailed code as a second step. The portal then emails six-digit codes (sign-in and confirming a new address) and a few notices. It sends no links and no client data. Render's free web service cannot use SMTP, so use Brevo's HTTPS API. Brevo needs a verified sender; a domain you own with its DKIM and SPF records gives reliable delivery, and a free-mail address (Gmail, Yahoo) as the sender is rewritten by Brevo and often lands in spam.
 
 1. Create a free account at brevo.com. Under **Senders, Domains & Dedicated IPs** add and **verify a sender address** you can receive mail at (a domain you own gives the best delivery; a single verified address works to start).
 2. **SMTP & API → API keys → Generate a new API key.** Copy it once.
 3. In Render's Environment tab set `ORS_SRS_MAIL_FROM` (that verified address, optionally as `Name <address>`) and `ORS_SRS_BREVO_API_KEY` **first**, and only then add `ORS_SRS_MAIL=brevo`. With `ORS_SRS_MAIL=brevo` and an empty sender the app refuses to start (the first 0.1.1 deploy failed exactly this way).
 4. Redeploy, sign in, then **Account → Two-step sign-in → Email codes (optional)**: add your email, type the code you receive. Keep the authenticator app too: it needs no mail.
-5. Sign-up is now open on the sign-in page. Every sign-up must confirm an email and then be approved by you (the owner) under **Admins**. To close it, set `ORS_SRS_SIGNUP=off`.
 
 Free-plan limits worth knowing: Brevo's free plan allows about 300 mails a day (each sign-in uses one), and a code that lands in spam can be requested again after a minute. If mail is switched off or fails, an administrator whose only second step is an emailed code **cannot sign in** (the portal never falls back to the password alone; an administrator with the authenticator app is not affected); the owner fixes the mail settings or, from their own computer, runs `DATABASE_URL='<Neon direct string>' python app.py reset-2fa <id>`.
 

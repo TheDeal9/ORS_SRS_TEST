@@ -34,3 +34,9 @@ services:
         sync: false
       - key: ORS_SRS_BREVO_API_KEY  # Brevo > SMTP & API > API keys; used only to send codes and account notices
         sync: false
+      - key: ORS_SRS_GOOGLE_CLIENT_ID  # Google Cloud Console > OAuth client (Web application); sign-up is closed to everyone until all three are set
+        sync: false
+      - key: ORS_SRS_GOOGLE_CLIENT_SECRET  # the same client's secret; used only to swap the one-time code at Google's token endpoint
+        sync: false
+      - key: ORS_SRS_GOOGLE_ALLOWED_EMAILS  # comma-separated Google addresses allowed to sign up as administrators (the owner's list; no approval step)
+        sync: false

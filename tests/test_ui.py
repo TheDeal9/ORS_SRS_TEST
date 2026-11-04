@@ -1,6 +1,7 @@
 """Phase 3 and UI: the page must satisfy the strict Content-Security-Policy, dark mode must be complete and
 readable, animations must be optional, and the client page must work with a keyboard."""
 import re
+import time
 from pathlib import Path
 
 import pytest
@@ -36,10 +37,12 @@ def pages(app, admin, anon):
     with app.app_context():
         Admin.query.filter_by(username='admin').one().email = 'owner@example.test'  # so the account page shows its email variant
         db.session.commit()
-    half = app.test_client()  # password right, code not yet entered
-    half.post('/admin/signup', data={'username': 'dr-new', 'email': 'new@example.test', 'password': PASSWORD, 'confirm': PASSWORD})
-    verifying = html(half, '/admin/verify')
     from conftest import make_user
+    make_user(app, 'verifier')
+    from conftest import sign_in as _sign_in
+    half = _sign_in(app, 'verifier')  # asked to confirm an address, code not yet entered
+    half.post('/admin/account/email', data={'email': 'new@example.test', 'current': PASSWORD})
+    verifying = html(half, '/admin/verify')
     make_user(app, 'doc', email='doc@example.test')
     second = app.test_client()
     second.post('/admin/login', data={'username': 'doc', 'password': PASSWORD})
@@ -52,8 +55,14 @@ def pages(app, admin, anon):
     forced.post('/admin/login', data={'username': 'newbie', 'password': PASSWORD})
     setup_page = html(forced, '/admin/2fa/setup')  # forced enrolment: password right, no second step yet
     app.config['REQUIRE_2FA'] = False
+    app.config.update(GOOGLE_CLIENT_ID='cid', GOOGLE_CLIENT_SECRET='sec', GOOGLE_ALLOWED=frozenset({'ok@example.test'}))
+    signup_ready = html(anon, '/admin/signup')  # the page with the Google button
+    proof = app.test_client()
+    with proof.session_transaction() as s:
+        s['gsignup'] = {'sub': 'g-1', 'email': 'ok@example.test', 'exp': int(time.time()) + 600}
+    signup_finish = html(proof, '/admin/signup/finish')
     out = {
-        'signup': html(anon, '/admin/signup'), 'verify': verifying, 'twofactor': html(second, '/admin/2fa'),
+        'signup': html(anon, '/admin/signup'), 'signup_ready': signup_ready, 'signup_finish': signup_finish, 'verify': verifying, 'twofactor': html(second, '/admin/2fa'),
         'totp': html(admin, '/admin/account/totp'), 'admins': html(admin, '/admin/admins'), 'caseload': html(admin, '/admin/caseload'),
         'landing': html(anon, '/'), 'login': html(anon, '/admin/login'), 'closed': html(anon, '/client/nope'),
         'assessment': html(anon, f'/client/{token}'), 'clients': html(admin, '/admin'), 'recent': html(admin, '/admin/recent'),

@@ -77,7 +77,7 @@ def test_database_url_is_normalised_for_the_psycopg_driver(given, expected):
 ADMIN_GET = ['/admin', '/admin/recent', '/admin/caseload', '/admin/admins', '/admin/account/totp', '/admin/account', '/admin/client/some-id', '/admin/client/some-id/report', '/admin/assessment/1', '/admin/client/some-id/export', '/admin/export-all']
 ADMIN_POST = ['/admin/clients', '/admin/account/password', '/admin/account/recovery', '/admin/account/keys', '/admin/account/keys/1/revoke', '/admin/client/some-id/links', '/admin/client/some-id/links/revoke',
               '/admin/client/some-id/delete', '/admin/assessment/1/delete', '/admin/account/email', '/admin/account/totp', '/admin/account/backup-codes',
-              '/admin/account/totp/disable', '/admin/admins/1/approve', '/admin/admins/1/reject', '/admin/admins/1/disable', '/admin/admins/1/enable']
+              '/admin/account/totp/disable', '/admin/admins/1/remove', '/admin/admins/1/disable', '/admin/admins/1/enable']
 
 
 @pytest.mark.parametrize('path', ADMIN_GET)
@@ -175,7 +175,7 @@ def test_every_admin_post_rejects_missing_csrf_token(tmp_path):
                  '/admin/client/jane-patel/delete', '/admin/assessment/1/delete', '/admin/logout',
                  '/admin/account/password', '/admin/account/recovery', '/admin/account/keys', '/admin/account/keys/1/revoke',
                  '/admin/account/email', '/admin/account/totp', '/admin/account/totp/disable', '/admin/account/backup-codes',
-                 '/admin/admins/1/approve', '/admin/signup', '/admin/verify', '/admin/verify/resend', '/admin/2fa', '/admin/2fa/resend',
+                 '/admin/admins/1/remove', '/admin/signup/finish', '/admin/verify', '/admin/verify/resend', '/admin/2fa', '/admin/2fa/resend',
                  '/admin/2fa/setup']:
         assert c.post(path, data={'first_name': 'x', 'last_name': 'y'}).status_code == 400, path
     assert db_count(app, app_module.Client) == 1  # the forged deletes did nothing
@@ -349,6 +349,11 @@ def test_render_blueprint_keeps_secrets_out_of_the_repo_and_matches_the_guide():
     assert 'ORS_SRS_MAIL' not in blocks
     for secret in ('ORS_SRS_MAIL_FROM', 'ORS_SRS_BREVO_API_KEY'):
         assert 'sync: false' in blocks[secret] and 'value:' not in blocks[secret], secret
+    # Google sign-up: the client id, secret and allow-list are typed in the dashboard, never stored here. Leaving them out must
+    # not stop the app (the sign-up page then says it is not set up).
+    for secret in ('ORS_SRS_GOOGLE_CLIENT_ID', 'ORS_SRS_GOOGLE_CLIENT_SECRET', 'ORS_SRS_GOOGLE_ALLOWED_EMAILS'):
+        assert 'sync: false' in blocks[secret] and 'value:' not in blocks[secret], secret
+    assert 'GOCSPX-' not in text and '.apps.googleusercontent.com' not in text
     assert 'generateValue: true' in blocks['ORS_SRS_SECRET_KEY'] and 'value:' not in blocks['ORS_SRS_SECRET_KEY']
     assert 'value: "1"' in blocks['ORS_SRS_PROXY_HOPS']  # one trusted proxy: more would let a visitor spoof their address
     assert 'ORS_SRS_ENV' not in text  # dev mode would drop the Secure cookie flag

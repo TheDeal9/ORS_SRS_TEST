@@ -8,5 +8,5 @@
 <label for="code">Code</label><input class="otp" type="text" id="code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9 ]*" maxlength="7" required autofocus>
 <button class="btn" type="submit">Confirm</button></form>
 <form method="post" action="{{ url_for('main.admin_verify_resend') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn light" type="submit">Send a new code</button></form>
-<p class="hint">{% if signed_in %}<a href="{{ url_for('main.account') }}">Back to Account</a>{% else %}<a href="{{ url_for('main.admin_login') }}">Back to sign in</a>{% endif %}</p></div>
+<p class="hint"><a href="{{ url_for('main.account') }}">Back to Account</a></p></div>
 <script src="{{ url_for('static', filename='vendor/motion.js') }}" defer></script><script src="{{ url_for('static', filename='admin.js') }}" defer></script></body></html>

@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>Choose your ID and password</title>
+<script src="{{ url_for('static', filename='theme.js') }}"></script><link rel="icon" href="data:,"><link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}"></head>
+<body class="center"><button class="icon-btn theme-corner" type="button" data-theme-toggle aria-pressed="false">Dark mode</button>
+<form class="card-page reveal" method="post" action="{{ url_for('main.admin_signup_finish') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><h1>Choose your ID and password</h1><p>Google confirmed <strong>{{ email }}</strong>. You will sign in with the ID and password below, then a code from your authenticator app.</p>
+{% with messages = get_flashed_messages() %}{% if messages %}<p class="warn-box">{{ messages[0] }}</p>{% endif %}{% endwith %}
+<label for="username">Choose an administrator ID</label><input type="text" id="username" name="username" value="{{ form.username }}" autocomplete="username" autocapitalize="none" spellcheck="false" minlength="2" maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9._\-]+" required autofocus>
+<p class="hint">Letters, digits, dot, dash or underscore. You sign in with it.</p>
+<label for="password">Password ({{ min_len }}+ characters)</label><input type="password" id="password" name="password" autocomplete="new-password" minlength="{{ min_len }}" required>
+<label for="confirm">Repeat the password</label><input type="password" id="confirm" name="confirm" autocomplete="new-password" minlength="{{ min_len }}" required>
+<button class="btn" type="submit">Continue to two-step set-up</button>
+<p class="hint">Next you scan a code with an authenticator app and receive ten backup codes in a recovery kit. Save it on your own computer.</p>
+<p class="hint"><a href="{{ url_for('main.admin_signup') }}">Start again</a></p></form>
+<script src="{{ url_for('static', filename='vendor/motion.js') }}" defer></script><script src="{{ url_for('static', filename='admin.js') }}" defer></script></body></html>

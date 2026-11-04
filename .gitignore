@@ -12,3 +12,4 @@ Automate_ORS_SRS_Excel_Scoring.md
 .neon
 node_modules/
 .playwright-mcp/
+client_secret*.json
