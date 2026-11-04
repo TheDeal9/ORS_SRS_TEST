@@ -232,6 +232,13 @@ def test_a_wrong_state_is_refused_and_so_is_a_replayed_one(gapp, google):
     refused(gapp, c, come_back(c, google, q))  # the same state a second time: it was used up
 
 
+def test_a_sign_up_started_before_the_owner_closed_sign_up_is_refused_on_return(gapp, google):
+    c = gapp.test_client()
+    q = begin(c)
+    gapp.config['SIGNUP_ENABLED'] = False
+    refused(gapp, c, come_back(c, google, q))
+
+
 def test_an_expired_state_is_refused(gapp, google):
     c = gapp.test_client()
     q = begin(c)

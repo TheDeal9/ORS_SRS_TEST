@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.3: Sign in with Google (2026-11-04)
+
+**Added**
+- `/admin/google/login` and a **Sign in with Google** button on the sign-in page. An administrator who signed up with Google can use it in place of the password. It needs only the Google client ID and secret (not the allow-list), never creates an account, and is shared with the sign-up callback (the purpose is kept in the signed session, a missing value means sign-up).
+- Google replaces only the password: the authenticator code or a backup code is still asked for, an administrator with no second step yet is sent to the forced set-up, and a disabled account is refused. The password form and Google now share one `first_step_passed` step.
+
+**Not included**
+- Administrators made by `setup`, the first-start seed or `create-admin` have no Google link, so they keep using the password. Linking a Google account from the Account page (with the password re-asked) is not built.
+
 ## 0.1.2: Google sign-up, no mail, no approval (2026-11-04)
 
 Administrator sign-up is open at boot and no longer needs a mail server or the owner's approval. Google proves the email; the owner's allow-list decides who may register.

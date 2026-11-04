@@ -48,7 +48,7 @@ import scoring
 import twofactor
 from charts import domains_svg, outcome_bar_svg, session_means_svg, trend_svg
 
-VERSION = '0.1.2'
+VERSION = '0.1.3'
 BASE = Path(__file__).resolve().parent
 XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 PER_PAGE = 20
@@ -738,9 +738,14 @@ def signup_open():
     return current_app.config['SIGNUP_ENABLED']
 
 
-def google_ready():
+def google_configured():
+    """Enough to sign in with Google: the client id and secret. Sign-up also needs the allow-list (google_ready)."""
     cfg = current_app.config
-    return bool(cfg['GOOGLE_CLIENT_ID'] and cfg['GOOGLE_CLIENT_SECRET'] and cfg['GOOGLE_ALLOWED'])
+    return bool(cfg['GOOGLE_CLIENT_ID'] and cfg['GOOGLE_CLIENT_SECRET'])
+
+
+def google_ready():
+    return google_configured() and bool(current_app.config['GOOGLE_ALLOWED'])
 
 
 def send_mail(to, subject, body):
@@ -1015,29 +1020,39 @@ def save_assessment():
 
 # ---------------------------------------------------------------- admin auth
 
+def first_step_passed(admin):
+    """The password, or Google, has just proved who this is. Returns the response for what comes next (the second step, the
+    forced app set-up, or signed in where no second step is required), or None after flashing why this account cannot go on.
+    Google replaces only the password: the second step is never skipped."""
+    if admin.status != 'active':  # only 'disabled' is possible now; anything else gets no way in either
+        flash('This account is disabled. Ask the portal owner.')
+        return None
+    method = second_step_method(admin)
+    if method == 'blocked':
+        flash('This account\'s authenticator app can no longer be read (the portal\'s secret key changed), so sign-in is '
+              'paused. The portal owner can fix it from their computer with: python app.py reset-2fa <your ID>')
+    elif not method and current_app.config['REQUIRE_2FA']:
+        set_pre(admin, 'enroll', 'totp')  # first step right, no second step yet: nothing opens until the app is set up
+        return redirect(url_for('main.admin_2fa_setup'))
+    elif not method:
+        return finish_login(admin)
+    elif method == 'email' and not mail_ready():
+        flash('Email codes are not available on this server right now, so sign-in is paused. Ask the portal owner.')
+    else:
+        return begin_second_step(admin, method)
+    return None
+
+
 @bp.route('/admin/login', methods=['GET', 'POST'])
 @limiter.limit('5 per minute', methods=['POST'])
 def admin_login():
     if request.method == 'POST':
         admin = authenticate(request.form.get('username', ''), request.form.get('password', ''))
         if admin:
-            # Only a correct password reveals what state the account is in, so IDs cannot be probed through these.
-            if admin.status != 'active':  # only 'disabled' is possible now; anything else gets no way in either
-                flash('This account is disabled. Ask the portal owner.')
-            else:
-                method = second_step_method(admin)
-                if method == 'blocked':
-                    flash('This account\'s authenticator app can no longer be read (the portal\'s secret key changed), so sign-in is '
-                          'paused. The portal owner can fix it from their computer with: python app.py reset-2fa <your ID>')
-                elif not method and current_app.config['REQUIRE_2FA']:
-                    set_pre(admin, 'enroll', 'totp')  # password right, no second step yet: nothing opens until the app is set up
-                    return redirect(url_for('main.admin_2fa_setup'))
-                elif not method:
-                    return finish_login(admin)
-                elif method == 'email' and not mail_ready():
-                    flash('Email codes are not available on this server right now, so sign-in is paused. Ask the portal owner.')
-                else:
-                    return begin_second_step(admin, method)
+            # Only a correct password reveals what state the account is in, so IDs cannot be probed through this.
+            response = first_step_passed(admin)
+            if response:
+                return response
         else:
             flash('Incorrect administrator ID or password.')  # one message for both, so IDs cannot be probed
     return render_template('login.html', signup=signup_open())
@@ -1213,32 +1228,53 @@ def admin_signup():
     return render_template('signup.html', mode='start' if google_ready() else 'unready')
 
 
-@bp.get('/admin/google/start')
-@limiter.limit('10 per minute')
-def admin_google_start():
-    if not (signup_open() and google_ready()):
-        return redirect(url_for('main.admin_signup'))
+def google_redirect(purpose):
+    """Send the browser to Google with a fresh state and nonce. `purpose` ('signup' or 'login') is kept in the signed session,
+    never in the URL, so the callback cannot be steered from outside."""
     cfg = current_app.config
     state, nonce = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
-    session['gstate'] = {'state': state, 'nonce': nonce, 'exp': int(time.time()) + PROOF_TTL}
+    session['gstate'] = {'state': state, 'nonce': nonce, 'purpose': purpose, 'exp': int(time.time()) + PROOF_TTL}
     query = urllib.parse.urlencode({'client_id': cfg['GOOGLE_CLIENT_ID'], 'redirect_uri': url_for('main.admin_google_callback', _external=True),
                                     'response_type': 'code', 'scope': 'openid email', 'state': state, 'nonce': nonce,
                                     'prompt': 'select_account'})
     return redirect(f"{cfg['GOOGLE_AUTH_URL']}?{query}")
 
 
+@bp.get('/admin/google/start')
+@limiter.limit('10 per minute')
+def admin_google_start():
+    if not (signup_open() and google_ready()):
+        return redirect(url_for('main.admin_signup'))
+    return google_redirect('signup')
+
+
+@bp.get('/admin/google/login')
+@limiter.limit('10 per minute')
+def admin_google_login():
+    """Sign in with the Google account linked at sign-up. Needs only the client id and secret: the allow-list gates sign-up,
+    not an existing administrator, and ORS_SRS_SIGNUP=off does not stop anyone signing in."""
+    if not google_configured():
+        return redirect(url_for('main.admin_login'))
+    return google_redirect('login')
+
+
 @bp.get('/admin/google/callback')
 @limiter.limit('10 per minute')
 def admin_google_callback():
-    def refuse(message, cause, where='main.admin_signup'):
-        current_app.logger.warning('Google sign-up refused: %s', cause)  # the cause only: never a code, token or address
+    cfg = current_app.config
+    started = session.pop('gstate', None)  # used up by this attempt, right or wrong: a state is never replayed
+    purpose = started.get('purpose') if isinstance(started, dict) else None
+    if purpose != 'login':
+        purpose = 'signup'  # a missing or odd value takes the stricter path
+    back = 'main.admin_login' if purpose == 'login' else 'main.admin_signup'
+
+    def refuse(message, cause, where=back):
+        current_app.logger.warning('Google %s refused: %s', purpose, cause)  # the cause only: never a code, token or address
         flash(message)
         return redirect(url_for(where))
 
-    if not (signup_open() and google_ready()):
-        return redirect(url_for('main.admin_signup'))
-    cfg = current_app.config
-    started = session.pop('gstate', None)  # used up by this attempt, right or wrong: a state is never replayed
+    if not (google_configured() and (purpose == 'login' or (signup_open() and google_ready()))):
+        return redirect(url_for(back))
     failed = 'Google sign-in did not work. Please try again.'
     if request.args.get('error'):
         return refuse('Google sign-in was cancelled.', 'cancelled')
@@ -1252,8 +1288,14 @@ def admin_google_callback():
                                        cfg['GOOGLE_CLIENT_ID'], started['nonce'])
     except GoogleError as exc:
         return refuse(failed, exc)
-    if AdminIdentity.query.filter_by(provider='google', subject=subject).first():
-        return refuse('This Google account already has an account. Sign in with your ID and password.', 'known account', 'main.admin_login')
+    known = AdminIdentity.query.filter_by(provider='google', subject=subject).first()
+    if purpose == 'login':  # never creates an account: the Google account must already be linked to an administrator
+        if not known:
+            return refuse('No portal account is linked to this Google account. Sign up first, or sign in with your ID and password.',
+                          'no linked account')
+        return first_step_passed(known.admin) or redirect(url_for('main.admin_login'))
+    if known:
+        return refuse('This Google account already has an account. Sign in with your ID and password, or with Google.', 'known account', 'main.admin_login')
     if email not in cfg['GOOGLE_ALLOWED']:
         return refuse('This Google account is not on the list for this portal. Ask the portal owner.', 'not on the list')
     session['gsignup'] = {'sub': subject, 'email': email, 'exp': int(time.time()) + PROOF_TTL}
@@ -2025,6 +2067,7 @@ def create_app(config=None):
     if hops:  # only trust X-Forwarded-* when actually behind that many proxies
         app.wsgi_app = ProxyFix(app.wsgi_app, x_for=hops, x_proto=hops, x_host=hops)
     app.jinja_env.globals['min_len'] = MIN_PASSWORD_LEN
+    app.jinja_env.globals['google_login'] = google_configured  # the sign-in page shows its Google button only when set up
     db.init_app(app)
     csrf.init_app(app)
     limiter.init_app(app)
