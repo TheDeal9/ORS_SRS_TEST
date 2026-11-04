@@ -171,6 +171,8 @@ class Admin(db.Model):
     totp_secret = db.Column(db.String(200))  # Fernet-sealed; enabled only once totp_enabled_at is set
     totp_enabled_at = db.Column(db.DateTime)
     totp_last_step = db.Column(db.Integer, nullable=False, default=0)  # newest 30 s step already used: no replay
+    # Unused one-time backup codes for signing in without the phone: comma-joined keyed hashes (see otp_digest), never the codes.
+    backup_hashes = db.Column(db.Text)
     clients = db.relationship('Client', back_populates='admin', order_by='Client.id')  # no cascade: deleting an admin must not delete data
     api_keys = db.relationship('ApiKey', back_populates='admin', cascade='all, delete-orphan', order_by='ApiKey.id')
 
@@ -553,6 +555,7 @@ OTP_COOLDOWN = timedelta(seconds=60)  # the earliest a new code may be sent afte
 OTP_MAX_TRIES = 5  # wrong guesses a single code survives
 MFA_MAX_FAILS = 10  # wrong second-step codes in a row before the account's second step locks
 MFA_LOCK = timedelta(minutes=15)
+BACKUP_CODES = 10  # made together; each works once, in place of the authenticator code
 PRE_TTL = 600  # seconds a half-signed-in browser (password right, code not yet) may take to finish
 
 
@@ -787,12 +790,60 @@ def note_second_step_failure(admin):
 
 
 def second_step_method(admin):
-    """'totp' (authenticator app), 'email', or '' when this admin has no second step set up. A sealed secret that can no
-    longer be read (SECRET_KEY changed) falls back to email. An admin with an email but no working mail is refused, not
-    waved through: a missing second step must never be a way in."""
-    if admin.totp_enabled_at and twofactor.unseal(admin.totp_secret, current_app.config['SECRET_KEY']):
-        return 'totp'
+    """'totp' (authenticator app), 'email', '' when this admin has no second step set up, or 'blocked' when the app is on
+    but its sealed secret can no longer be read (SECRET_KEY changed) and there is no email to fall back to. An admin with
+    an email but no working mail is refused, not waved through, and 'blocked' is refused too: a lost second step must
+    never turn into password-only sign-in, nor into a chance for the password alone to enrol a new app."""
+    if admin.totp_enabled_at:
+        if twofactor.unseal(admin.totp_secret, current_app.config['SECRET_KEY']):
+            return 'totp'
+        return 'email' if admin.email else 'blocked'
     return 'email' if admin.email else ''
+
+
+def new_backup_codes(admin):
+    """Replace the admin's backup codes. Returns the plain codes ('abcde-fghij'); only keyed hashes are stored."""
+    raw = [secrets.token_hex(5) for _ in range(BACKUP_CODES)]  # 40 bits each; the keyed hash plus the try limits make guessing hopeless
+    admin.backup_hashes = ','.join(otp_digest(admin, 'backup', c) for c in raw)
+    return [f'{c[:5]}-{c[5:]}' for c in raw]
+
+
+def backups_left(admin):
+    return len([h for h in (admin.backup_hashes or '').split(',') if h])
+
+
+def spend_backup_code(admin, code):
+    """True if `code` is one of the admin's unused backup codes; it is then used up. The caller holds lock_admin and commits."""
+    plain = re.sub(r'[^0-9a-f]', '', str(code).lower())  # case, spaces and dashes do not matter
+    digest = otp_digest(admin, 'backup', plain)
+    left = [h for h in (admin.backup_hashes or '').split(',') if h]
+    hit = [h for h in left if secrets.compare_digest(h, digest)]  # looks at every hash, so timing does not say which one matched
+    if len(plain) != 10 or not hit:
+        return False
+    left.remove(hit[0])
+    admin.backup_hashes = ','.join(left) or None
+    return True
+
+
+def recovery_kit(admin, codes, recovery=None):
+    """The text of the one-time recovery kit: backup codes (and a password recovery code if one was made at the same time)
+    with the advice to keep it on the admin's own computer. The page shows it once and offers it as a file."""
+    lines = ['ORS/SRS Portal recovery kit', f'Administrator ID: {admin.username}',
+             f'Sign-in page: {url_for("main.admin_login", _external=True)}',
+             f'Made on: {datetime.now(ZoneInfo(current_app.config["TIMEZONE"])).strftime("%Y-%m-%d")}', '',
+             'SAVE THIS FILE NOW, on your own computer or in your password manager. It is shown only once and the portal',
+             'keeps no readable copy. Without it and your phone, only the portal owner can get you back in.', '',
+             'BACKUP CODES. If you lose your phone, type one in place of the authenticator code at sign-in.',
+             'Each works once. You still need your password.']
+    lines += [f'  {i}. {code}' for i, code in enumerate(codes, 1)]
+    if recovery:
+        lines += ['', 'PASSWORD RECOVERY CODE. Resets a forgotten password at /admin/forgot. It does not replace the',
+                  'authenticator app or a backup code.', f'  {recovery}']
+    lines += ['', 'KEEP IT PRIVATE. Do not email it, post it in chat or keep it only on the phone that holds the',
+              'authenticator app. Anyone with this file and your password can sign in.',
+              f'If you lose the phone and these codes, the portal owner runs: python app.py reset-2fa {admin.username}',
+              'Making new backup codes under Account cancels every backup code listed here.']
+    return '\n'.join(lines)
 
 
 def set_pre(admin, purpose, method='email'):
@@ -810,13 +861,13 @@ def pre_admin(purpose):
     admin = db.session.get(Admin, pre.get('aid') or 0)
     if not admin or not secrets.compare_digest(str(pre.get('stamp', '')), admin.stamp):
         return None
-    if (purpose == 'login' and admin.status != 'active') or (purpose == 'verify' and admin.status not in ('unverified', 'active')):
+    if (purpose in ('login', 'enroll') and admin.status != 'active') or (purpose == 'verify' and admin.status not in ('unverified', 'active')):
         return None
     return admin
 
 
-def finish_login(admin):
-    """The one place a browser becomes signed in."""
+def start_session(admin):
+    """The one place a browser becomes signed in. Clears the session first, so flash after calling it."""
     session.clear()
     session.update(aid=admin.id, stamp=admin.stamp)
     session.permanent = True
@@ -824,10 +875,14 @@ def finish_login(admin):
     admin.mfa_fails, admin.locked_until = 0, None
     clear_otp(admin)
     db.session.commit()
+
+
+def finish_login(admin):
+    start_session(admin)
     if not admin.recovery_hash:
         flash('You have no recovery code yet. Create one under Account so you can reset a forgotten password.')
-    elif not admin.email and mail_ready():
-        flash('Add an email address under Account to turn on two-step sign-in.')
+    elif not admin.totp_enabled_at and not admin.email:
+        flash('Two-step sign-in is off. Set up an authenticator app under Account.')
     return redirect(url_for('main.dashboard'))
 
 
@@ -952,9 +1007,15 @@ def admin_login():
                 flash('This account is disabled. Ask the portal owner.')
             else:
                 method = second_step_method(admin)
-                if not method:
+                if method == 'blocked':
+                    flash('This account\'s authenticator app can no longer be read (the portal\'s secret key changed), so sign-in is '
+                          'paused. The portal owner can fix it from their computer with: python app.py reset-2fa <your ID>')
+                elif not method and current_app.config['REQUIRE_2FA']:
+                    set_pre(admin, 'enroll', 'totp')  # password right, no second step yet: nothing opens until the app is set up
+                    return redirect(url_for('main.admin_2fa_setup'))
+                elif not method:
                     return finish_login(admin)
-                if method == 'email' and not mail_ready():
+                elif method == 'email' and not mail_ready():
                     flash('Email codes are not available on this server right now, so sign-in is paused. Ask the portal owner.')
                 else:
                     return begin_second_step(admin, method)
@@ -994,11 +1055,14 @@ def admin_2fa():
             ok = False
             if method == 'totp':
                 secret = twofactor.unseal(admin.totp_secret, current_app.config['SECRET_KEY'])
-                step = twofactor.verify(secret, code, admin.totp_last_step) if secret and challenge_live(admin, 'login') else None
+                live = challenge_live(admin, 'login')
+                step = twofactor.verify(secret, code, admin.totp_last_step) if secret and live else None
                 if step:
                     admin.totp_last_step, ok = step, True
-                elif challenge_live(admin, 'login'):
-                    admin.otp_tries += 1
+                elif live:  # not an app code: it may be a backup code (same tries, same lockout)
+                    ok = spend_backup_code(admin, code)
+                    if not ok:
+                        admin.otp_tries += 1
             else:
                 ok = check_otp(admin, 'login', code)
             if ok:
@@ -1006,7 +1070,8 @@ def admin_2fa():
             note_second_step_failure(admin)
             db.session.commit()
             flash('That code is not right or has expired.')
-    return render_template('twofactor.html', method=method, email=mask_email(admin.email), locked=second_step_locked(admin))
+    return render_template('twofactor.html', method=method, email=mask_email(admin.email), locked=second_step_locked(admin),
+                           can_email=bool(admin.email) and mail_ready(), backups=backups_left(admin))
 
 
 @bp.post('/admin/2fa/resend')
@@ -1025,6 +1090,45 @@ def admin_2fa_resend():
         flash({'sent': 'A new code is on its way.', 'wait': 'A code was sent a moment ago. Wait a minute before asking for another.',
                'failed': 'We could not email the code. Please try again in a minute.'}[result])
     return redirect(url_for('main.admin_2fa'))
+
+
+def totp_setup(admin, proven):
+    """Show or finish authenticator-app setup. Returns (kit, None) once a right code turned the app on (the caller flashes
+    the kit and commits), else (None, page). `proven` means the password was just checked (forced enrolment); otherwise the
+    form's current-password field is checked."""
+    key = current_app.config['SECRET_KEY']
+    secret = twofactor.unseal(admin.totp_secret, key) if admin.totp_secret else None
+    if request.method == 'POST' and secret and (proven or confirmed_by_password()):
+        lock_admin(admin)
+        step = twofactor.verify(secret, request.form.get('code', ''))
+        if step:
+            admin.totp_enabled_at, admin.totp_last_step = utcnow(), step
+            recovery = None if admin.recovery_hash else issue_recovery_code(admin)  # the kit is the one safe place to show it
+            return recovery_kit(admin, new_backup_codes(admin), recovery), None
+        flash('That code is not right. Check the phone clock and try the next code.')
+    if not secret:
+        secret = twofactor.new_secret()
+        admin.totp_secret = twofactor.seal(secret, key)
+        db.session.commit()
+    uri = twofactor.provisioning_uri(secret, admin.username)
+    return None, render_template('totp_setup.html' if proven else 'totp.html', qr=twofactor.qr_data_uri(uri),
+                                 key=' '.join(secret[i:i + 4] for i in range(0, len(secret), 4)))
+
+
+@bp.route('/admin/2fa/setup', methods=['GET', 'POST'])
+@limiter.limit('5 per minute', methods=['POST'])
+def admin_2fa_setup():
+    """Forced enrolment: the password was right but this account has no second step. The browser holds only `pre`, so
+    nothing else opens until a code from the new app is entered."""
+    admin = pre_admin('enroll')
+    if not admin or second_step_method(admin):  # someone set up a second step meanwhile: start again
+        return redirect(url_for('main.admin_login'))
+    kit, page = totp_setup(admin, proven=True)
+    if kit:
+        start_session(admin)  # also commits the app switching on
+        flash(kit, 'kit')
+        return redirect(url_for('main.dashboard'))
+    return page
 
 
 # ---------------------------------------------------------------- admin sign-up, email proof, owner approval
@@ -1209,7 +1313,7 @@ def confirmed_by_password():
 @admin_required
 def account():
     return render_template('account.html', admin=g.admin, keys=g.admin.api_keys, mail=mail_ready(), version=VERSION,
-                           totp_on=bool(g.admin.totp_enabled_at))
+                           totp_on=bool(g.admin.totp_enabled_at), backups=backups_left(g.admin))
 
 
 @bp.post('/admin/account/password')
@@ -1296,29 +1400,31 @@ def account_email():
 @limiter.limit('5 per minute', methods=['POST'])
 def account_totp():
     """Turn on the authenticator app. The secret is made and stored (sealed) on first view; it only counts once a code
-    from the app is entered here together with the password."""
-    admin, key = g.admin, current_app.config['SECRET_KEY']
-    if admin.totp_enabled_at:
+    from the app is entered here together with the password. No email is needed: the backup codes shown right after are
+    the way back in if the phone is lost."""
+    if g.admin.totp_enabled_at:
         flash('The authenticator app is already on.')
         return redirect(url_for('main.account'))
-    if not admin.email:
-        flash('Confirm an email address first: it is the way back in if you lose the phone.')
-        return redirect(url_for('main.account'))
-    secret = twofactor.unseal(admin.totp_secret, key) if admin.totp_secret else None
-    if request.method == 'POST' and secret and confirmed_by_password():
-        step = twofactor.verify(secret, request.form.get('code', ''))
-        if step:
-            admin.totp_enabled_at, admin.totp_last_step = utcnow(), step
-            db.session.commit()
-            flash('Authenticator app is on. Sign-in now asks for its code.')
-            return redirect(url_for('main.account'))
-        flash('That code is not right. Check the phone clock and try the next code.')
-    if not secret:
-        secret = twofactor.new_secret()
-        admin.totp_secret = twofactor.seal(secret, key)
+    kit, page = totp_setup(g.admin, proven=False)
+    if kit:
+        flash(kit, 'kit')
         db.session.commit()
-    uri = twofactor.provisioning_uri(secret, admin.username)
-    return render_template('totp.html', qr=twofactor.qr_data_uri(uri), key=' '.join(secret[i:i + 4] for i in range(0, len(secret), 4)))
+        return redirect(url_for('main.account'))
+    return page
+
+
+@bp.post('/admin/account/backup-codes')
+@admin_required
+@limiter.limit('5 per minute')
+def account_backup_codes():
+    """A new set of backup codes. The old set stops working at once."""
+    if not g.admin.totp_enabled_at:
+        flash('Turn on the authenticator app first: backup codes are for signing in without it.')
+    elif confirmed_by_password():
+        lock_admin(g.admin)
+        flash(recovery_kit(g.admin, new_backup_codes(g.admin)), 'kit')
+        db.session.commit()
+    return redirect(url_for('main.account'))
 
 
 @bp.post('/admin/account/totp/disable')
@@ -1332,10 +1438,14 @@ def account_totp_disable():
         if secret and not twofactor.verify(secret, request.form.get('code', ''), admin.totp_last_step):
             flash('That code is not right. Nothing was changed.')
         else:
-            admin.totp_secret = admin.totp_enabled_at = None
+            admin.totp_secret = admin.totp_enabled_at = admin.backup_hashes = None
             admin.totp_last_step = 0
             db.session.commit()
-            flash('Authenticator app turned off. Sign-in uses the emailed code.')
+            if admin.email:
+                flash('Authenticator app turned off. Sign-in uses the emailed code.')
+            else:
+                flash('Authenticator app turned off, and its backup codes no longer work.'
+                      + (' You will be asked to set it up again at the next sign-in.' if current_app.config['REQUIRE_2FA'] else ''))
     return redirect(url_for('main.account'))
 
 
@@ -1788,6 +1898,7 @@ def create_app(config=None):
         SMTP_PASSWORD=env('ORS_SRS_SMTP_PASSWORD', ''),
         SMTP_SECURITY=env('ORS_SRS_SMTP_SECURITY', 'starttls'),
         BREVO_API_KEY=env('ORS_SRS_BREVO_API_KEY', ''),
+        REQUIRE_2FA=env('ORS_SRS_REQUIRE_2FA', 'on').lower() != 'off',  # on: an admin with no second step must set up the app to get in
         SIGNUP_ENABLED=env('ORS_SRS_SIGNUP', 'on').lower() != 'off',  # lets the owner close sign-up without touching mail
     )
     if config:
@@ -1932,13 +2043,13 @@ def command_reset_2fa(args):
         admin = Admin.query.filter_by(username=norm_username(args[0])).first()
         if not admin:
             sys.exit(f'No administrator "{args[0]}". Run `python app.py admins` to see the IDs.')
-        admin.email = admin.pending_email = admin.totp_secret = admin.totp_enabled_at = None
+        admin.email = admin.pending_email = admin.totp_secret = admin.totp_enabled_at = admin.backup_hashes = None
         admin.totp_last_step, admin.mfa_fails, admin.locked_until = 0, 0, None
         clear_otp(admin)
         db.session.commit()
         name = admin.username
-    print(f'Second step removed for "{name}": they sign in with the password alone until they add and confirm an email '
-          f'address under Account again.')
+    print(f'Second step and backup codes removed for "{name}". At the next sign-in they enter the password and then set up '
+          f'the authenticator app again (unless ORS_SRS_REQUIRE_2FA=off, which lets the password alone in).')
 
 
 def command_api_key(args):

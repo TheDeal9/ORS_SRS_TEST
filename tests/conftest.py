@@ -26,6 +26,7 @@ def make_app(tmp_path, **overrides):
         TIMEZONE='UTC',
         MAIL_BACKEND='memory',  # sent mail lands in app.config['MAIL_OUTBOX']
         MAIL_FROM='ORS SRS Portal <portal@example.test>',
+        REQUIRE_2FA=False,  # off for the older tests, which sign in with the password alone; test_backup_codes.py turns it on
     )
     config.update(overrides)
     app = create_app(config)
@@ -126,6 +127,18 @@ def last_code(app, to):
 def totp_now(secret, offset=0):
     import time
     return pyotp.TOTP(secret).at(time.time() + 30 * offset)
+
+
+def enable_totp(app, c, username='admin'):
+    """Turn the authenticator app on for a signed-in administrator. Returns (plain secret, the page shown right after,
+    which carries the one-time recovery kit)."""
+    import twofactor
+    c.get('/admin/account/totp')
+    with app.app_context():
+        secret = twofactor.unseal(app_module.Admin.query.filter_by(username=username).one().totp_secret, app.config['SECRET_KEY'])
+    r = c.post('/admin/account/totp', data={'code': totp_now(secret), 'current': PASSWORD}, follow_redirects=True)
+    assert r.status_code == 200 and 'kit-text' in r.get_data(as_text=True), r.get_data(as_text=True)[:400]
+    return secret, r.get_data(as_text=True)
 
 
 def db_count(app, model):

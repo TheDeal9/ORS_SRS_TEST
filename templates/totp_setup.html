@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>Set up two-step sign in</title>
+<script src="{{ url_for('static', filename='theme.js') }}"></script><link rel="icon" href="data:,"><link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}"></head>
+<body class="center"><button class="icon-btn theme-corner" type="button" data-theme-toggle aria-pressed="false">Dark mode</button>
+<div class="card-page reveal"><h1>Set up your authenticator app</h1>
+<p>This portal asks every administrator for a code from an authenticator app (Google Authenticator, Duo Mobile, Aegis, 1Password and others work). Scan this code with the app, then enter the six-digit code it shows.</p>
+{% with messages = get_flashed_messages() %}{% if messages %}<p class="warn-box">{{ messages[0] }}</p>{% endif %}{% endwith %}
+<div class="qr"><img src="{{ qr }}" alt="QR code for your authenticator app" width="200" height="200"></div>
+<p class="hint">Cannot scan it? In the app choose "enter a setup key" and type: <code>{{ key }}</code></p>
+<form method="post" action="{{ url_for('main.admin_2fa_setup') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+<label for="code">Code from the app</label><input class="otp" type="text" id="code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9 ]*" maxlength="7" required autofocus>
+<button class="btn" type="submit">Turn on and sign in</button></form>
+<p class="hint">Next you get ten backup codes in a recovery kit. Save it on your own computer: it is how you get back in if you lose the phone.</p>
+<p class="hint"><a href="{{ url_for('main.admin_login') }}">Start again</a></p></div>
+<script src="{{ url_for('static', filename='vendor/motion.js') }}" defer></script><script src="{{ url_for('static', filename='admin.js') }}" defer></script></body></html>

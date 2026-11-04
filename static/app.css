@@ -256,3 +256,5 @@ code { font: 12.5px ui-monospace, monospace; background: var(--soft); padding: 1
 table.wrap-cells th, table.wrap-cells td { white-space: normal; }  /* many short columns: wrap rather than scroll sideways */
 td.actions-cell { min-width: 130px; }
 td.actions-cell form.inline { display: inline-block; margin: 2px 6px 2px 0; }
+.kit .kit-text { margin: 8px 0; padding: 10px; overflow-x: auto; border-radius: 7px; background: var(--surface); color: var(--text); border: 1px solid var(--note-line); font: 12px/1.5 ui-monospace, monospace; white-space: pre-wrap; user-select: all; }
+.kit .btn { display: inline-block; margin-right: 6px; }

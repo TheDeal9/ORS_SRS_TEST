@@ -463,7 +463,7 @@ def test_setup_creates_the_login_in_the_database_and_the_settings_in_env(cli_env
     assert not any(k.startswith('ORS_SRS_ADMIN') for k in env) and NEW_PASSWORD not in (cli_env / '.env').read_text()
     assert 'Sign in with exactly that ID' in out and '"dr-demo"' in out
     os.environ.update(env)
-    app = create_app({'RATELIMIT_ENABLED': False, 'WTF_CSRF_ENABLED': False})
+    app = create_app({'RATELIMIT_ENABLED': False, 'WTF_CSRF_ENABLED': False, 'REQUIRE_2FA': False})
     assert app.config['SESSION_COOKIE_SECURE'] is False
     login(app, 'dr-demo', NEW_PASSWORD)
     code = re.search(r'[0-9a-f]{4}(?:-[0-9a-f]{4}){5}', out).group(0)
@@ -486,7 +486,7 @@ def test_rerunning_setup_resets_the_password_revokes_keys_and_keeps_the_secret(c
     app_module.command_setup()
     secret = app_module.read_env()['ORS_SRS_SECRET_KEY']
     os.environ.update(app_module.read_env())
-    app = create_app({'RATELIMIT_ENABLED': False, 'WTF_CSRF_ENABLED': False})
+    app = create_app({'RATELIMIT_ENABLED': False, 'WTF_CSRF_ENABLED': False, 'REQUIRE_2FA': False})
     c = login(app, 'dr-demo', NEW_PASSWORD)
     key = KEY_RE.search(c.post('/admin/account/keys', data={'label': 'k', 'current': NEW_PASSWORD}, follow_redirects=True).get_data(as_text=True)).group(1)
     type_into(monkeypatch, 'dr-demo', 'second password 22', 'second password 22')
@@ -494,7 +494,7 @@ def test_rerunning_setup_resets_the_password_revokes_keys_and_keeps_the_secret(c
     assert app_module.read_env()['ORS_SRS_SECRET_KEY'] == secret
     assert c.get('/admin').status_code == 302 and app.test_client().get('/api/v1/me', headers=bearer(key)).status_code == 401
     assert admins_in(cli_env)[1] == 1
-    login(create_app({'RATELIMIT_ENABLED': False, 'WTF_CSRF_ENABLED': False}), 'dr-demo', 'second password 22')
+    login(create_app({'RATELIMIT_ENABLED': False, 'WTF_CSRF_ENABLED': False, 'REQUIRE_2FA': False}), 'dr-demo', 'second password 22')
 
 
 @pytest.mark.parametrize('passwords, message', [(('short', 'short'), 'at least 10'), ((NEW_PASSWORD, 'typo typo typo'), 'differ')])

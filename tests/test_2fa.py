@@ -282,12 +282,6 @@ def enrol(app, c, username='doc'):
     return secret
 
 
-def test_totp_needs_a_confirmed_email_first(app):
-    c = sign_in(app, 'admin')
-    r = c.get('/admin/account/totp', follow_redirects=True)
-    assert 'Confirm an email address first' in r.get_data(as_text=True) and admin_row(app, 'admin')['totp_secret'] is None
-
-
 def test_setup_page_shows_a_qr_and_key_and_stores_the_secret_sealed(app, doc):
     c = full_login(app)
     page = c.get('/admin/account/totp').get_data(as_text=True)

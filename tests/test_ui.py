@@ -34,7 +34,7 @@ def pages(app, admin, anon):
     key_page = admin.post('/admin/account/keys', data={'label': 'laptop', 'current': PASSWORD}, follow_redirects=True).get_data(as_text=True)
     from app import Admin, db
     with app.app_context():
-        Admin.query.filter_by(username='admin').one().email = 'owner@example.test'  # totp setup needs a confirmed email
+        Admin.query.filter_by(username='admin').one().email = 'owner@example.test'  # so the account page shows its email variant
         db.session.commit()
     half = app.test_client()  # password right, code not yet entered
     half.post('/admin/signup', data={'username': 'dr-new', 'email': 'new@example.test', 'password': PASSWORD, 'confirm': PASSWORD})
@@ -43,6 +43,15 @@ def pages(app, admin, anon):
     make_user(app, 'doc', email='doc@example.test')
     second = app.test_client()
     second.post('/admin/login', data={'username': 'doc', 'password': PASSWORD})
+    from conftest import enable_totp, sign_in
+    make_user(app, 'kitter')
+    kit_page = enable_totp(app, sign_in(app, 'kitter'), 'kitter')[1]  # the account page right after the app is turned on: carries the recovery kit
+    make_user(app, 'newbie')
+    app.config['REQUIRE_2FA'] = True
+    forced = app.test_client()
+    forced.post('/admin/login', data={'username': 'newbie', 'password': PASSWORD})
+    setup_page = html(forced, '/admin/2fa/setup')  # forced enrolment: password right, no second step yet
+    app.config['REQUIRE_2FA'] = False
     out = {
         'signup': html(anon, '/admin/signup'), 'verify': verifying, 'twofactor': html(second, '/admin/2fa'),
         'totp': html(admin, '/admin/account/totp'), 'admins': html(admin, '/admin/admins'), 'caseload': html(admin, '/admin/caseload'),
@@ -51,7 +60,7 @@ def pages(app, admin, anon):
         'client': html(admin, f'/admin/client/{cid}'), 'detail': html(admin, f'/admin/assessment/{aid}'),
         'report': html(admin, f'/admin/client/{cid}/report'),
         'forgot': html(anon, '/admin/forgot'), 'account': html(admin, '/admin/account'),
-        'account_secret': secret_page, 'account_key': key_page,
+        'account_secret': secret_page, 'account_key': key_page, 'kit': kit_page, 'setup': setup_page,
     }
     # last, because resetting the password ends the admin's session
     out['recovery_done'] = anon.post('/admin/forgot', data={'username': 'admin', 'code': code, 'password': 'another long password',
@@ -62,7 +71,7 @@ def pages(app, admin, anon):
 # ---- strict CSP: nothing inline, nothing third-party ---------------------------------------------------
 
 PAGES = ['signup', 'verify', 'twofactor', 'totp', 'admins', 'caseload', 'landing', 'login', 'closed', 'assessment', 'clients', 'recent', 'client', 'detail', 'report',
-         'forgot', 'account', 'account_secret', 'account_key', 'recovery_done']
+         'forgot', 'account', 'account_secret', 'account_key', 'recovery_done', 'kit', 'setup']
 
 
 @pytest.mark.parametrize('name', PAGES)
@@ -100,7 +109,7 @@ def test_scripts_emit_no_inline_styles_handlers_or_eval(name):
 
 
 def test_scripts_are_loaded_deferred_and_motion_comes_first(pages):
-    for name in ('clients', 'recent', 'client', 'report', 'login', 'signup', 'verify', 'twofactor', 'totp', 'admins', 'caseload'):
+    for name in ('clients', 'recent', 'client', 'report', 'login', 'signup', 'verify', 'twofactor', 'setup', 'totp', 'admins', 'caseload'):
         tags = re.findall(r'<script src="([^"]+)"([^>]*)>', pages[name])
         srcs = [t[0] for t in tags]
         assert srcs[0].endswith('theme.js') and not tags[0][1].strip()           # theme first, blocking, no flash of the wrong theme
@@ -173,7 +182,7 @@ def test_chart_series_are_visible_against_the_chart_surface_in_both_themes():
 
 
 def test_theme_toggle_exists_on_admin_and_login_pages_but_not_the_client_form(pages):
-    for name in ('clients', 'recent', 'client', 'report', 'login', 'signup', 'verify', 'twofactor', 'totp', 'admins', 'caseload'):
+    for name in ('clients', 'recent', 'client', 'report', 'login', 'signup', 'verify', 'twofactor', 'setup', 'totp', 'admins', 'caseload'):
         assert 'data-theme-toggle' in pages[name], name
     assert 'data-theme-toggle' not in pages['assessment']
 

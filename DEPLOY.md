@@ -50,7 +50,7 @@ Choose the administrator ID you want (for example `bhargav`). You do not need to
 ## 4. Create the service on Render (Blueprint)
 
 1. dashboard.render.com, **New**, **Blueprint**, connect the repository, branch `main`.
-2. Render reads `render.yaml` and shows one service, `ors-srs-portal`: Python, **Free**, **Singapore**. Everything below is already filled in. It asks for five values (the last two only if you want sign-up and emailed codes; see section 4c):
+2. Render reads `render.yaml` and shows one service, `ors-srs-portal`: Python, **Free**, **Singapore**. Everything below is already filled in. It asks for five values (the last two only if you want sign-up and emailed codes, so leave them blank for now; see section 4c):
 
    | Render asks for | Enter |
    |---|---|
@@ -70,7 +70,6 @@ Already set for you by `render.yaml` (check them on the Environment tab):
 | `ORS_SRS_PROXY_HOPS` | `1` | trust exactly one proxy (Render's); without it links come out as `http://` and the login limit sees the wrong address |
 | `ORS_SRS_TIMEZONE` | `Asia/Kolkata` | dates follow your calendar day |
 | `PYTHON_VERSION` | `3.14.8` | the version the tests ran on |
-| `ORS_SRS_MAIL` | `brevo` | one-time codes are sent over HTTPS, because Render's free plan blocks the SMTP ports (25, 465, 587) |
 
 Do **not** set `ORS_SRS_ENV`: leaving it unset keeps the Secure cookie flag on. The start command deliberately has no `--access-logfile`, so the secret client links never appear in logs. Keep `--workers 1`: the login rate limiter keeps its counters in memory.
 
@@ -84,17 +83,29 @@ Do **not** set `ORS_SRS_ENV`: leaving it unset keeps the Secure cookie flag on. 
 4. In Render, Environment tab: **delete `ORS_SRS_ADMIN_PASSWORD_HASH`** (and optionally the username). It was used once to create your account and is no longer needed; keeping it only leaves an old hash lying around.
 5. Optional: *Create API key*, then on your computer `export ORS_SRS_URL=https://<your-service>.onrender.com ORS_SRS_API_KEY=ors_...` and `python app.py cli clients`.
 
-## 4c. Email: one-time codes and sign-up (Brevo, free)
+## 4b. Two-step sign-in with an authenticator app (no email needed)
 
-The portal emails six-digit codes (sign-up confirmation and sign-in) and a few notices. It sends no links and no client data. Render's free web service cannot use SMTP, so the Blueprint uses Brevo's HTTPS API.
+The first time you sign in (the first administrator on a fresh database, or any administrator with no second step) the portal asks you to set up an authenticator app before anything else opens:
+
+1. Sign in with the ID and password. The next page shows a QR code. Scan it with Google Authenticator, Duo Mobile, Aegis, 1Password or similar (or type the setup key).
+2. Type the six-digit code the app shows. You are signed in.
+3. The page now shows your **recovery kit**: ten one-time backup codes (and a password recovery code if you had none). **Click Download recovery kit and save the file on your own computer** (or in your password manager). It is shown only once. Do not email it and do not keep it only on the phone that holds the app.
+4. If you lose the phone, sign in with the password, then type a backup code in the "Lost your phone?" box. Each code works once. Under **Account** you can see how many are left and make a new set (the old set stops working).
+5. Lost the phone *and* the codes: from your own computer run `DATABASE_URL='<Neon direct string>' python app.py reset-2fa <id>`, sign in with the password and set the app up again.
+
+`ORS_SRS_REQUIRE_2FA=off` in Render's Environment tab lets an administrator with no second step in with the password alone; leave it unset. Do not change `ORS_SRS_SECRET_KEY` afterwards: stored app secrets and backup codes are tied to it, and an account that has only the app is then refused until you run `reset-2fa` (it is never let in on the password alone).
+
+## 4c. Email: one-time codes and sign-up (Brevo, free; optional)
+
+Email is **optional** and **off by default**: the Blueprint does not set `ORS_SRS_MAIL`. Without it there is no sign-up page and no emailed codes; the authenticator app above works fine. Set it up only when you want other practitioners to sign up. The portal then emails six-digit codes (sign-up confirmation and sign-in) and a few notices. It sends no links and no client data. Render's free web service cannot use SMTP, so use Brevo's HTTPS API. Brevo needs a verified sender; a domain you own with its DKIM and SPF records gives reliable delivery, and a free-mail address (Gmail, Yahoo) as the sender is rewritten by Brevo and often lands in spam.
 
 1. Create a free account at brevo.com. Under **Senders, Domains & Dedicated IPs** add and **verify a sender address** you can receive mail at (a domain you own gives the best delivery; a single verified address works to start).
 2. **SMTP & API → API keys → Generate a new API key.** Copy it once.
-3. In Render's Environment tab set `ORS_SRS_MAIL_FROM` (that verified address, optionally as `Name <address>`) and `ORS_SRS_BREVO_API_KEY`. Leave `ORS_SRS_MAIL=brevo`.
-4. Redeploy, sign in, then **Account → Two-step sign-in**: add your email, type the code you receive. From then on every sign-in asks for a code.
+3. In Render's Environment tab set `ORS_SRS_MAIL_FROM` (that verified address, optionally as `Name <address>`) and `ORS_SRS_BREVO_API_KEY` **first**, and only then add `ORS_SRS_MAIL=brevo`. With `ORS_SRS_MAIL=brevo` and an empty sender the app refuses to start (the first 0.1.1 deploy failed exactly this way).
+4. Redeploy, sign in, then **Account → Two-step sign-in → Email codes (optional)**: add your email, type the code you receive. Keep the authenticator app too: it needs no mail.
 5. Sign-up is now open on the sign-in page. Every sign-up must confirm an email and then be approved by you (the owner) under **Admins**. To close it, set `ORS_SRS_SIGNUP=off`.
 
-Free-plan limits worth knowing: Brevo's free plan allows about 300 mails a day (each sign-in uses one), and a code that lands in spam can be requested again after a minute. If mail is switched off or fails, an administrator who already has an email **cannot sign in** (the portal never falls back to the password alone); the owner fixes the mail settings or, from their own computer, runs `DATABASE_URL='<Neon direct string>' python app.py reset-2fa <id>`.
+Free-plan limits worth knowing: Brevo's free plan allows about 300 mails a day (each sign-in uses one), and a code that lands in spam can be requested again after a minute. If mail is switched off or fails, an administrator whose only second step is an emailed code **cannot sign in** (the portal never falls back to the password alone; an administrator with the authenticator app is not affected); the owner fixes the mail settings or, from their own computer, runs `DATABASE_URL='<Neon direct string>' python app.py reset-2fa <id>`.
 
 ## 5. First-run check (do this from your phone on mobile data)
 
@@ -128,7 +139,7 @@ Your part:
 Known limits on the free plans (accepted, not hidden):
 - Neon and Render free plans have no IP allow-list, so the database accepts connections from the internet, protected by TLS and its long random password. A paid Neon plan adds an allow-list.
 - Render appends to the `X-Forwarded-For` header and visitors can send their own, so the app trusts only the **last** entry (`ORS_SRS_PROXY_HOPS=1`). If that entry turns out to be Render's edge rather than the visitor, the five-tries limit is shared among visitors behind that edge: it still blocks guessing, it just may block you too for a minute.
-- The emailed second step is only as strong as the mailbox that receives it (turn on two-step sign-in for that mailbox too). The authenticator app, which does not depend on email, is the stronger option; its emailed fallback is as strong as the mailbox. Administrators without a confirmed email still sign in with the password alone, so confirm yours.
+- The emailed second step is only as strong as the mailbox that receives it (turn on two-step sign-in for that mailbox too). The authenticator app does not depend on email and is the stronger option. Its backup codes are only as safe as the file you save them in: keep the kit on your own computer, not in email or chat. With `ORS_SRS_REQUIRE_2FA` on (default) every administrator must set up the app; API keys (read-only) are a separate way in that does not use a second step, so revoke the ones you do not use.
 - The sign-in code limits (five tries per code, a lock after ten wrong codes) are counted in the database; the per-address request limits are in memory and assume one worker.
 - The portal is a clinical aid, not a certified medical system, and the data lives with US-based providers in Singapore. Check what applies to your practice (India's DPDP Act, your professional body). This is not legal advice.
 
@@ -166,7 +177,7 @@ Why not Firebase (Firestore) or MongoDB Atlas instead:
 python -m pytest && git add -A && git commit -m "describe the change" && git push
 ```
 
-Render rebuilds on every push to `main`. **Upgrading from 0.1.0 to 0.1.1 changes the schema** (administrator ownership, sign-up and second-step fields) and there is no migration: a v0.1.0 database must be recreated, so the app refuses to start on one. If you have not entered real clients yet, create a fresh Neon branch or empty the database and let the app build the new tables. If you have, export first (**Download all reports**), do not push 0.1.1 until you have a plan, and ask for a migration script. Changing the database schema (adding a column) is the one case that needs care: the app only creates missing tables and never alters existing ones. If you deploy code that expects a new column, the app refuses to start and the Render log says which columns are missing. Add a migration tool (Alembic) before the first schema change, and back up first.
+Render rebuilds on every push to `main`. A local development database made before the backup-codes fix also needs `ALTER TABLE admin ADD COLUMN backup_hashes TEXT;` (SQLite and Postgres accept it as written; a fresh database needs nothing). **Upgrading from 0.1.0 to 0.1.1 changes the schema** (administrator ownership, sign-up and second-step fields) and there is no migration: a v0.1.0 database must be recreated, so the app refuses to start on one. If you have not entered real clients yet, create a fresh Neon branch or empty the database and let the app build the new tables. If you have, export first (**Download all reports**), do not push 0.1.1 until you have a plan, and ask for a migration script. Changing the database schema (adding a column) is the one case that needs care: the app only creates missing tables and never alters existing ones. If you deploy code that expects a new column, the app refuses to start and the Render log says which columns are missing. Add a migration tool (Alembic) before the first schema change, and back up first.
 
 Change your password under **Account**. Changing `ORS_SRS_ADMIN_PASSWORD_HASH` in Render later does nothing, because it is read only while the `admin` table is empty. Forgotten password: **Forgot your password?** with the recovery code, or from your own computer `DATABASE_URL='<Neon direct string>' python app.py reset-password <id>`. Changing `ORS_SRS_SECRET_KEY` signs everyone out.
 
@@ -183,6 +194,7 @@ Change your password under **Account**. Changing `ORS_SRS_ADMIN_PASSWORD_HASH` i
 | `OperationalError ... SSL` or `prepared statement already exists` | Use the **direct** Neon string (no `-pooler`) with `?sslmode=require`. |
 | `429 Too Many Requests` on sign-in | Five wrong attempts in a minute. Wait a minute. |
 | Sign-in says "Email codes are not available" or "could not email the code" | `ORS_SRS_MAIL` is unset or the provider rejected the send (Render log: `mail not sent (brevo: status 401)` or similar, never the code). Check `ORS_SRS_BREVO_API_KEY`, that `ORS_SRS_MAIL_FROM` is a verified sender, and Brevo's daily limit. Locked out entirely: `python app.py reset-2fa <id>` from your computer. |
+| Sign-in says the authenticator app "can no longer be read" | `ORS_SRS_SECRET_KEY` changed, so the stored app secret cannot be opened. Run `python app.py reset-2fa <id>` from your computer, sign in with the password and set the app up again. |
 | Startup error "ORS_SRS_MAIL..." | A mail setting is incomplete (see the message). `smtp` needs host and sender; `brevo` needs key and sender; `console` is for `ORS_SRS_ENV=dev` only. |
 | First page after a quiet spell takes a minute | The free service was asleep (section 8). |
 
